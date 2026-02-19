@@ -19,6 +19,9 @@ type runtime_options_t = {
   restart_on_failure?: boolean;
   max_restarts_per_worker?: number;
   max_pending_calls_per_worker?: number;
+  restart_base_delay_ms?: number;
+  restart_max_delay_ms?: number;
+  restart_jitter_ms?: number;
 };
 
 export type workerprocedurecall_constructor_params_t = runtime_options_t;
@@ -90,6 +93,37 @@ export type remote_constant_information_t = {
   installed_worker_count: number;
 };
 
+export type worker_health_state_t =
+  | 'starting'
+  | 'ready'
+  | 'degraded'
+  | 'restarting'
+  | 'stopped';
+
+export type worker_event_severity_t = 'info' | 'warn' | 'error';
+
+export type worker_event_t = {
+  event_id: string;
+  worker_id: number;
+  source: 'worker' | 'parent';
+  event_name: string;
+  severity: worker_event_severity_t;
+  timestamp: string;
+  correlation_id?: string;
+  error?: remote_error_t;
+  details?: Record<string, unknown>;
+};
+
+export type worker_event_listener_t = (worker_event: worker_event_t) => void;
+
+export type worker_health_information_t = {
+  worker_id: number;
+  health_state: worker_health_state_t;
+  pending_call_count: number;
+  pending_control_count: number;
+  restart_attempt: number;
+};
+
 export type worker_call_proxy_t = {
   [function_name: string]: (...args: unknown[]) => Promise<unknown>;
 };
@@ -123,6 +157,7 @@ type worker_constant_definition_t = {
 type worker_state_t = {
   worker_id: number;
   worker_instance: Worker;
+  health_state: worker_health_state_t;
   ready: boolean;
   shutting_down: boolean;
   restart_attempt: number;
@@ -194,10 +229,23 @@ type control_response_message_t = {
   error?: remote_error_t;
 };
 
+type worker_event_message_t = {
+  message_type: 'worker_event';
+  event_id: string;
+  worker_id: number;
+  event_name: string;
+  severity: worker_event_severity_t;
+  timestamp: string;
+  correlation_id?: string;
+  error?: remote_error_t;
+  details?: Record<string, unknown>;
+};
+
 type worker_to_parent_message_t =
   | ready_message_t
   | call_response_message_t
-  | control_response_message_t;
+  | control_response_message_t
+  | worker_event_message_t;
 
 declare global {
   function wpc_import(alias: string): Promise<unknown>;
@@ -380,7 +428,7 @@ function ParseStringLiteralConstants(params: {
 
 function BuildWorkerRuntimeScript(): string {
   return String.raw`
-const { parentPort } = require('node:worker_threads');
+const { parentPort, threadId } = require('node:worker_threads');
 
 if (!parentPort) {
   throw new Error('Worker runtime started without parentPort.');
@@ -389,6 +437,7 @@ if (!parentPort) {
 const worker_function_registry = new Map();
 const worker_dependency_registry = new Map();
 const worker_constant_registry = new Map();
+let next_worker_event_id = 1;
 
 function GetErrorMessage(error) {
   if (error instanceof Error) {
@@ -415,6 +464,46 @@ function ToRemoteError(error) {
     name: 'Error',
     message: GetErrorMessage(error)
   };
+}
+
+function EmitWorkerEvent(params) {
+  const event_message = {
+    message_type: 'worker_event',
+    event_id: 'worker_' + String(threadId) + '_' + String(next_worker_event_id),
+    worker_id: threadId,
+    event_name: params.event_name,
+    severity: params.severity,
+    timestamp: new Date().toISOString(),
+    correlation_id: params.correlation_id,
+    error: params.error,
+    details: params.details
+  };
+
+  next_worker_event_id += 1;
+
+  try {
+    parentPort.postMessage(event_message);
+  } catch {
+    // Ignore - cannot safely report event transport failures.
+  }
+}
+
+function SafePostMessage(message) {
+  try {
+    parentPort.postMessage(message);
+    return true;
+  } catch (error) {
+    EmitWorkerEvent({
+      event_name: 'post_message_failed',
+      severity: 'error',
+      error: ToRemoteError(error),
+      details: {
+        message_type: message && message.message_type ? message.message_type : null
+      }
+    });
+
+    return false;
+  }
 }
 
 function EnsureSerializable(value, label) {
@@ -556,96 +645,148 @@ globalThis.wpc_constant = function(name) {
   return worker_constant_registry.get(name);
 };
 
-parentPort.on('message', async function(message) {
-  if (!message || typeof message !== 'object') {
+async function HandleControlRequest(message) {
+  const control_request_id = message.control_request_id;
+
+  if (typeof control_request_id !== 'string' || control_request_id.length === 0) {
+    EmitWorkerEvent({
+      event_name: 'malformed_control_request',
+      severity: 'warn',
+      details: {
+        reason: 'control_request_id missing or invalid'
+      }
+    });
+
     return;
   }
 
-  const message_type = message.message_type;
-
-  if (message_type === 'control_request') {
-    const control_request_id = message.control_request_id;
-
-    if (typeof control_request_id !== 'string') {
-      return;
-    }
-
-    try {
-      if (message.command === 'define_function') {
-        InstallFunction(message.payload);
-      } else if (message.command === 'undefine_function') {
-        const function_name = message.payload && message.payload.name;
-        if (typeof function_name !== 'string' || function_name.length === 0) {
-          throw new Error('Function name is required for undefine.');
-        }
-
-        worker_function_registry.delete(function_name);
-      } else if (message.command === 'define_dependency') {
-        await InstallDependency(message.payload);
-      } else if (message.command === 'undefine_dependency') {
-        const dependency_alias = message.payload && message.payload.alias;
-        if (typeof dependency_alias !== 'string' || dependency_alias.length === 0) {
-          throw new Error('Dependency alias is required for undefine.');
-        }
-
-        worker_dependency_registry.delete(dependency_alias);
-      } else if (message.command === 'define_constant') {
-        InstallConstant(message.payload);
-      } else if (message.command === 'undefine_constant') {
-        const constant_name = message.payload && message.payload.name;
-        if (typeof constant_name !== 'string' || constant_name.length === 0) {
-          throw new Error('Constant name is required for undefine.');
-        }
-
-        worker_constant_registry.delete(constant_name);
-      } else if (message.command === 'shutdown') {
-        parentPort.postMessage({
-          message_type: 'control_response',
-          control_request_id,
-          ok: true
-        });
-
-        setImmediate(function() {
-          process.exit(0);
-        });
-
-        return;
-      } else {
-        throw new Error('Unknown control command: ' + String(message.command));
+  try {
+    if (message.command === 'define_function') {
+      InstallFunction(message.payload);
+    } else if (message.command === 'undefine_function') {
+      const function_name = message.payload && message.payload.name;
+      if (typeof function_name !== 'string' || function_name.length === 0) {
+        throw new Error('Function name is required for undefine.');
       }
 
-      parentPort.postMessage({
+      worker_function_registry.delete(function_name);
+    } else if (message.command === 'define_dependency') {
+      await InstallDependency(message.payload);
+    } else if (message.command === 'undefine_dependency') {
+      const dependency_alias = message.payload && message.payload.alias;
+      if (typeof dependency_alias !== 'string' || dependency_alias.length === 0) {
+        throw new Error('Dependency alias is required for undefine.');
+      }
+
+      worker_dependency_registry.delete(dependency_alias);
+    } else if (message.command === 'define_constant') {
+      InstallConstant(message.payload);
+    } else if (message.command === 'undefine_constant') {
+      const constant_name = message.payload && message.payload.name;
+      if (typeof constant_name !== 'string' || constant_name.length === 0) {
+        throw new Error('Constant name is required for undefine.');
+      }
+
+      worker_constant_registry.delete(constant_name);
+    } else if (message.command === 'shutdown') {
+      SafePostMessage({
         message_type: 'control_response',
         control_request_id,
         ok: true
       });
-    } catch (error) {
-      parentPort.postMessage({
-        message_type: 'control_response',
-        control_request_id,
-        ok: false,
-        error: ToRemoteError(error)
+
+      EmitWorkerEvent({
+        event_name: 'worker_shutdown_requested',
+        severity: 'info',
+        correlation_id: control_request_id
       });
+
+      setImmediate(function() {
+        process.exit(0);
+      });
+
+      return;
+    } else {
+      throw new Error('Unknown control command: ' + String(message.command));
     }
 
-    return;
-  }
+    SafePostMessage({
+      message_type: 'control_response',
+      control_request_id,
+      ok: true
+    });
+  } catch (error) {
+    EmitWorkerEvent({
+      event_name: 'control_command_failed',
+      severity: 'error',
+      correlation_id: control_request_id,
+      error: ToRemoteError(error),
+      details: {
+        command: message.command
+      }
+    });
 
-  if (message_type !== 'call_request') {
-    return;
+    SafePostMessage({
+      message_type: 'control_response',
+      control_request_id,
+      ok: false,
+      error: ToRemoteError(error)
+    });
   }
+}
 
+async function HandleCallRequest(message) {
   const request_id = message.request_id;
   const function_name = message.function_name;
 
-  if (typeof request_id !== 'string' || typeof function_name !== 'string') {
+  if (typeof request_id !== 'string' || request_id.length === 0) {
+    EmitWorkerEvent({
+      event_name: 'malformed_call_request',
+      severity: 'warn',
+      details: {
+        reason: 'request_id missing or invalid'
+      }
+    });
+
+    return;
+  }
+
+  if (typeof function_name !== 'string' || function_name.length === 0) {
+    EmitWorkerEvent({
+      event_name: 'malformed_call_request',
+      severity: 'warn',
+      correlation_id: request_id,
+      details: {
+        reason: 'function_name missing or invalid'
+      }
+    });
+
+    SafePostMessage({
+      message_type: 'call_response',
+      request_id,
+      ok: false,
+      error: {
+        name: 'Error',
+        message: 'Malformed call request: function_name is required.'
+      }
+    });
+
     return;
   }
 
   const worker_function = worker_function_registry.get(function_name);
 
   if (!worker_function) {
-    parentPort.postMessage({
+    EmitWorkerEvent({
+      event_name: 'call_target_missing',
+      severity: 'warn',
+      correlation_id: request_id,
+      details: {
+        function_name
+      }
+    });
+
+    SafePostMessage({
       message_type: 'call_response',
       request_id,
       ok: false,
@@ -671,23 +812,100 @@ parentPort.on('message', async function(message) {
     const return_value = await worker_function(...call_args, function_context);
     EnsureSerializable(return_value, 'Worker return value');
 
-    parentPort.postMessage({
+    SafePostMessage({
       message_type: 'call_response',
       request_id,
       ok: true,
       return_value
     });
   } catch (error) {
-    parentPort.postMessage({
+    EmitWorkerEvent({
+      event_name: 'call_execution_failed',
+      severity: 'error',
+      correlation_id: request_id,
+      error: ToRemoteError(error),
+      details: {
+        function_name
+      }
+    });
+
+    SafePostMessage({
       message_type: 'call_response',
       request_id,
       ok: false,
       error: ToRemoteError(error)
     });
   }
+}
+
+async function HandleParentMessage(message) {
+  if (!message || typeof message !== 'object') {
+    EmitWorkerEvent({
+      event_name: 'malformed_parent_message',
+      severity: 'warn',
+      details: {
+        reason: 'message is not an object'
+      }
+    });
+
+    return;
+  }
+
+  const message_type = message.message_type;
+
+  if (message_type === 'control_request') {
+    await HandleControlRequest(message);
+    return;
+  }
+
+  if (message_type === 'call_request') {
+    await HandleCallRequest(message);
+    return;
+  }
+
+  EmitWorkerEvent({
+    event_name: 'unknown_message_type',
+    severity: 'warn',
+    details: {
+      message_type: typeof message_type === 'string' ? message_type : null
+    }
+  });
+}
+
+parentPort.on('message', function(message) {
+  void HandleParentMessage(message).catch(function(error) {
+    EmitWorkerEvent({
+      event_name: 'message_handler_failure',
+      severity: 'error',
+      error: ToRemoteError(error)
+    });
+  });
 });
 
-parentPort.postMessage({ message_type: 'ready' });
+process.on('uncaughtException', function(error) {
+  EmitWorkerEvent({
+    event_name: 'uncaught_exception',
+    severity: 'error',
+    error: ToRemoteError(error)
+  });
+});
+
+process.on('unhandledRejection', function(reason) {
+  EmitWorkerEvent({
+    event_name: 'unhandled_rejection',
+    severity: 'error',
+    error: ToRemoteError(reason)
+  });
+});
+
+SafePostMessage({ message_type: 'ready' });
+EmitWorkerEvent({
+  event_name: 'worker_ready',
+  severity: 'info',
+  details: {
+    pid: process.pid
+  }
+});
 `;
 }
 
@@ -712,10 +930,13 @@ export class WorkerProcedureCall {
   private ready_waiter_by_worker_id = new Map<number, worker_ready_waiter_t>();
   private exit_waiter_by_worker_id = new Map<number, worker_exit_waiter_t>();
   private last_error_by_worker_id = new Map<number, Error>();
+  private worker_event_listener_by_id = new Map<number, worker_event_listener_t>();
 
   private next_worker_id = 1;
   private next_call_request_id = 1;
   private next_control_request_id = 1;
+  private next_worker_event_id = 1;
+  private next_worker_event_listener_id = 1;
   private round_robin_index = 0;
 
   private default_call_timeout_ms = 30_000;
@@ -725,6 +946,9 @@ export class WorkerProcedureCall {
   private restart_on_failure = true;
   private max_restarts_per_worker = 3;
   private max_pending_calls_per_worker = 10_000;
+  private restart_base_delay_ms = 100;
+  private restart_max_delay_ms = 5_000;
+  private restart_jitter_ms = 100;
 
   private stop_in_progress_promise: Promise<void> | null = null;
 
@@ -733,6 +957,37 @@ export class WorkerProcedureCall {
   constructor(params: workerprocedurecall_constructor_params_t = {}) {
     this.applyRuntimeOptions({ options: params });
     this.call = this.createCallProxy();
+  }
+
+  onWorkerEvent(params: { listener: worker_event_listener_t }): number {
+    const { listener } = params;
+
+    const listener_id = this.next_worker_event_listener_id;
+    this.next_worker_event_listener_id += 1;
+
+    this.worker_event_listener_by_id.set(listener_id, listener);
+    return listener_id;
+  }
+
+  offWorkerEvent(params: { listener_id: number }): void {
+    const { listener_id } = params;
+    this.worker_event_listener_by_id.delete(listener_id);
+  }
+
+  getWorkerHealthStates(): worker_health_information_t[] {
+    return Array.from(this.worker_state_by_id.values())
+      .sort((left_worker_state, right_worker_state): number => {
+        return left_worker_state.worker_id - right_worker_state.worker_id;
+      })
+      .map((worker_state): worker_health_information_t => {
+        return {
+          worker_id: worker_state.worker_id,
+          health_state: worker_state.health_state,
+          pending_call_count: worker_state.pending_call_request_ids.size,
+          pending_control_count: worker_state.pending_control_request_ids.size,
+          restart_attempt: worker_state.restart_attempt
+        };
+      });
   }
 
   async defineWorkerFunction<args_t extends unknown[] = [unknown], return_t = unknown>(
@@ -1197,6 +1452,11 @@ export class WorkerProcedureCall {
     const worker_states = Array.from(this.worker_state_by_id.values());
     for (const worker_state of worker_states) {
       worker_state.shutting_down = true;
+      this.setWorkerHealthState({
+        worker_id: worker_state.worker_id,
+        health_state: 'stopped',
+        reason: 'stopWorkers requested'
+      });
     }
 
     await Promise.all(
@@ -1284,6 +1544,13 @@ export class WorkerProcedureCall {
         this.pending_call_by_request_id.delete(request_id);
         const current_worker_state = this.worker_state_by_id.get(worker_state.worker_id);
         current_worker_state?.pending_call_request_ids.delete(request_id);
+        if (current_worker_state) {
+          this.setWorkerHealthState({
+            worker_id: current_worker_state.worker_id,
+            health_state: 'degraded',
+            reason: `call timeout for ${function_name}`
+          });
+        }
 
         reject(
           new Error(
@@ -1315,6 +1582,11 @@ export class WorkerProcedureCall {
         clearTimeout(timeout_handle);
         worker_state.pending_call_request_ids.delete(request_id);
         this.pending_call_by_request_id.delete(request_id);
+        this.setWorkerHealthState({
+          worker_id: worker_state.worker_id,
+          health_state: 'degraded',
+          reason: `call dispatch failed for ${function_name}`
+        });
 
         reject(
           new Error(
@@ -1408,6 +1680,30 @@ export class WorkerProcedureCall {
       });
       this.max_pending_calls_per_worker = options.max_pending_calls_per_worker;
     }
+
+    if (typeof options.restart_base_delay_ms === 'number') {
+      ValidatePositiveInteger({
+        value: options.restart_base_delay_ms,
+        label: 'restart_base_delay_ms'
+      });
+      this.restart_base_delay_ms = options.restart_base_delay_ms;
+    }
+
+    if (typeof options.restart_max_delay_ms === 'number') {
+      ValidatePositiveInteger({
+        value: options.restart_max_delay_ms,
+        label: 'restart_max_delay_ms'
+      });
+      this.restart_max_delay_ms = options.restart_max_delay_ms;
+    }
+
+    if (typeof options.restart_jitter_ms === 'number') {
+      ValidateNonNegativeInteger({
+        value: options.restart_jitter_ms,
+        label: 'restart_jitter_ms'
+      });
+      this.restart_jitter_ms = options.restart_jitter_ms;
+    }
   }
 
   private generateCallRequestId(): string {
@@ -1422,6 +1718,106 @@ export class WorkerProcedureCall {
     return request_id;
   }
 
+  private generateWorkerEventId(): string {
+    const event_id = `event_${this.next_worker_event_id}`;
+    this.next_worker_event_id += 1;
+    return event_id;
+  }
+
+  private emitWorkerEvent(params: { worker_event: worker_event_t }): void {
+    const { worker_event } = params;
+
+    for (const listener of this.worker_event_listener_by_id.values()) {
+      try {
+        listener(worker_event);
+      } catch {
+        // Listener exceptions must never impact worker supervision.
+      }
+    }
+  }
+
+  private emitParentWorkerEvent(params: {
+    worker_id: number;
+    event_name: string;
+    severity: worker_event_severity_t;
+    correlation_id?: string;
+    error?: remote_error_t;
+    details?: Record<string, unknown>;
+  }): void {
+    const { worker_id, event_name, severity, correlation_id, error, details } =
+      params;
+
+    this.emitWorkerEvent({
+      worker_event: {
+        event_id: this.generateWorkerEventId(),
+        worker_id,
+        source: 'parent',
+        event_name,
+        severity,
+        timestamp: new Date().toISOString(),
+        correlation_id,
+        error,
+        details
+      }
+    });
+  }
+
+  private setWorkerHealthState(params: {
+    worker_id: number;
+    health_state: worker_health_state_t;
+    reason?: string;
+  }): void {
+    const { worker_id, health_state, reason } = params;
+
+    const worker_state = this.worker_state_by_id.get(worker_id);
+    if (!worker_state) {
+      return;
+    }
+
+    if (worker_state.health_state === health_state) {
+      return;
+    }
+
+    worker_state.health_state = health_state;
+
+    this.emitParentWorkerEvent({
+      worker_id,
+      event_name: 'worker_health_state_changed',
+      severity: health_state === 'degraded' ? 'warn' : 'info',
+      details: {
+        health_state,
+        reason: reason ?? null
+      }
+    });
+  }
+
+  private async waitForMs(params: { delay_ms: number }): Promise<void> {
+    const { delay_ms } = params;
+
+    if (delay_ms <= 0) {
+      return;
+    }
+
+    await new Promise<void>((resolve): void => {
+      setTimeout(resolve, delay_ms);
+    });
+  }
+
+  private getRestartDelayMs(params: { restart_attempt: number }): number {
+    const { restart_attempt } = params;
+
+    const exponential_multiplier = Math.max(1, 2 ** Math.max(0, restart_attempt - 1));
+    const base_delay_ms = this.restart_base_delay_ms * exponential_multiplier;
+    const capped_delay_ms = Math.min(base_delay_ms, this.restart_max_delay_ms);
+
+    if (this.restart_jitter_ms <= 0) {
+      return capped_delay_ms;
+    }
+
+    const jitter_delta = Math.floor(Math.random() * (this.restart_jitter_ms + 1));
+    return Math.min(capped_delay_ms + jitter_delta, this.restart_max_delay_ms);
+  }
+
   private async createWorker(params: { restart_attempt: number }): Promise<number> {
     const worker_id = this.next_worker_id;
     this.next_worker_id += 1;
@@ -1431,6 +1827,7 @@ export class WorkerProcedureCall {
     const worker_state: worker_state_t = {
       worker_id,
       worker_instance,
+      health_state: 'starting',
       ready: false,
       shutting_down: false,
       restart_attempt: params.restart_attempt,
@@ -1439,6 +1836,15 @@ export class WorkerProcedureCall {
     };
 
     this.worker_state_by_id.set(worker_id, worker_state);
+
+    this.emitParentWorkerEvent({
+      worker_id,
+      event_name: 'worker_spawned',
+      severity: 'info',
+      details: {
+        restart_attempt: params.restart_attempt
+      }
+    });
 
     worker_instance.on('message', (message: unknown): void => {
       this.handleWorkerMessage({ worker_id, message });
@@ -1720,6 +2126,11 @@ export class WorkerProcedureCall {
 
         this.pending_control_by_request_id.delete(control_request_id);
         worker_state.pending_control_request_ids.delete(control_request_id);
+        this.setWorkerHealthState({
+          worker_id,
+          health_state: 'degraded',
+          reason: `control timeout for ${command}`
+        });
 
         reject(
           new Error(
@@ -1751,6 +2162,11 @@ export class WorkerProcedureCall {
         clearTimeout(timeout_handle);
         worker_state.pending_control_request_ids.delete(control_request_id);
         this.pending_control_by_request_id.delete(control_request_id);
+        this.setWorkerHealthState({
+          worker_id,
+          health_state: 'degraded',
+          reason: `control dispatch failed for ${command}`
+        });
 
         reject(
           new Error(
@@ -1779,6 +2195,11 @@ export class WorkerProcedureCall {
     await new Promise<void>((resolve, reject): void => {
       const timeout_handle = setTimeout((): void => {
         this.ready_waiter_by_worker_id.delete(worker_id);
+        this.setWorkerHealthState({
+          worker_id,
+          health_state: 'degraded',
+          reason: 'ready timeout'
+        });
         reject(
           new Error(`Worker ${worker_id} did not report ready within ${timeout_ms}ms.`)
         );
@@ -1951,7 +2372,11 @@ export class WorkerProcedureCall {
   private getReadyWorkerStates(): worker_state_t[] {
     return Array.from(this.worker_state_by_id.values())
       .filter((worker_state): boolean => {
-        return worker_state.ready && !worker_state.shutting_down;
+        return (
+          worker_state.ready &&
+          !worker_state.shutting_down &&
+          worker_state.health_state === 'ready'
+        );
       })
       .sort((left_worker_state, right_worker_state): number => {
         return left_worker_state.worker_id - right_worker_state.worker_id;
@@ -1965,6 +2390,14 @@ export class WorkerProcedureCall {
     const { worker_id, message } = params;
 
     if (typeof message !== 'object' || message === null) {
+      this.emitParentWorkerEvent({
+        worker_id,
+        event_name: 'malformed_worker_message',
+        severity: 'warn',
+        details: {
+          reason: 'message is not an object'
+        }
+      });
       return;
     }
 
@@ -1991,6 +2424,23 @@ export class WorkerProcedureCall {
       });
       return;
     }
+
+    if (message_type === 'worker_event') {
+      this.handleWorkerEventMessage({
+        worker_id,
+        message: message as worker_to_parent_message_t
+      });
+      return;
+    }
+
+    this.emitParentWorkerEvent({
+      worker_id,
+      event_name: 'unknown_worker_message',
+      severity: 'warn',
+      details: {
+        message_type: typeof message_type === 'string' ? message_type : null
+      }
+    });
   }
 
   private handleReadyMessage(params: { worker_id: number }): void {
@@ -2002,6 +2452,11 @@ export class WorkerProcedureCall {
     }
 
     worker_state.ready = true;
+    this.setWorkerHealthState({
+      worker_id,
+      health_state: 'ready',
+      reason: 'worker sent ready message'
+    });
 
     const ready_waiter = this.ready_waiter_by_worker_id.get(worker_id);
     if (!ready_waiter) {
@@ -2011,6 +2466,52 @@ export class WorkerProcedureCall {
     this.ready_waiter_by_worker_id.delete(worker_id);
     clearTimeout(ready_waiter.timeout_handle);
     ready_waiter.resolve();
+  }
+
+  private handleWorkerEventMessage(params: {
+    worker_id: number;
+    message: worker_to_parent_message_t;
+  }): void {
+    const { worker_id, message } = params;
+
+    if (message.message_type !== 'worker_event') {
+      return;
+    }
+
+    const normalized_worker_event: worker_event_t = {
+      event_id: message.event_id,
+      worker_id,
+      source: 'worker',
+      event_name: message.event_name,
+      severity: message.severity,
+      timestamp: message.timestamp,
+      correlation_id: message.correlation_id,
+      error: message.error,
+      details: message.details
+    };
+
+    const worker_state = this.worker_state_by_id.get(worker_id);
+    const degraded_event_names = new Set<string>([
+      'uncaught_exception',
+      'message_handler_failure',
+      'post_message_failed'
+    ]);
+
+    if (
+      worker_state &&
+      message.severity === 'error' &&
+      degraded_event_names.has(message.event_name)
+    ) {
+      this.setWorkerHealthState({
+        worker_id,
+        health_state: 'degraded',
+        reason: message.event_name
+      });
+    }
+
+    this.emitWorkerEvent({
+      worker_event: normalized_worker_event
+    });
   }
 
   private handleCallResponseMessage(params: {
@@ -2036,6 +2537,11 @@ export class WorkerProcedureCall {
     clearTimeout(pending_call.timeout_handle);
 
     if (message.ok) {
+      this.setWorkerHealthState({
+        worker_id,
+        health_state: 'ready',
+        reason: 'call response ok'
+      });
       pending_call.resolve(message.return_value);
       return;
     }
@@ -2074,6 +2580,11 @@ export class WorkerProcedureCall {
     clearTimeout(pending_control.timeout_handle);
 
     if (message.ok) {
+      this.setWorkerHealthState({
+        worker_id,
+        health_state: 'ready',
+        reason: 'control response ok'
+      });
       pending_control.resolve();
       return;
     }
@@ -2089,6 +2600,20 @@ export class WorkerProcedureCall {
   private handleWorkerError(params: { worker_id: number; error: Error }): void {
     const { worker_id, error } = params;
     this.last_error_by_worker_id.set(worker_id, error);
+    this.setWorkerHealthState({
+      worker_id,
+      health_state: 'degraded',
+      reason: error.message
+    });
+    this.emitParentWorkerEvent({
+      worker_id,
+      event_name: 'worker_error',
+      severity: 'error',
+      error: ToRemoteError({ error }),
+      details: {
+        message: error.message
+      }
+    });
   }
 
   private handleWorkerExit(params: { worker_id: number; exit_code: number }): void {
@@ -2104,6 +2629,20 @@ export class WorkerProcedureCall {
       }
 
       return;
+    }
+
+    if (!worker_state.shutting_down && this.restart_on_failure) {
+      this.setWorkerHealthState({
+        worker_id,
+        health_state: 'restarting',
+        reason: 'worker exited unexpectedly'
+      });
+    } else {
+      this.setWorkerHealthState({
+        worker_id,
+        health_state: 'stopped',
+        reason: 'worker exited'
+      });
     }
 
     this.worker_state_by_id.delete(worker_id);
@@ -2146,6 +2685,16 @@ export class WorkerProcedureCall {
 
     const failure_reason = failure_parts.join(' ');
 
+    this.emitParentWorkerEvent({
+      worker_id,
+      event_name: 'worker_exited',
+      severity: exit_code === 0 ? 'info' : 'error',
+      details: {
+        exit_code,
+        failure_reason
+      }
+    });
+
     this.rejectPendingCallsForWorker({ worker_state, reason: failure_reason });
     this.rejectPendingControlsForWorker({ worker_state, reason: failure_reason });
 
@@ -2162,16 +2711,46 @@ export class WorkerProcedureCall {
     }
 
     if (worker_state.restart_attempt >= this.max_restarts_per_worker) {
+      this.emitParentWorkerEvent({
+        worker_id,
+        event_name: 'worker_restart_exhausted',
+        severity: 'error',
+        details: {
+          restart_attempt: worker_state.restart_attempt,
+          max_restarts_per_worker: this.max_restarts_per_worker
+        }
+      });
       return;
     }
 
     void this.restartWorker({
-      restart_attempt: worker_state.restart_attempt + 1
+      restart_attempt: worker_state.restart_attempt + 1,
+      failed_worker_id: worker_id
     });
   }
 
-  private async restartWorker(params: { restart_attempt: number }): Promise<void> {
-    const { restart_attempt } = params;
+  private async restartWorker(params: {
+    restart_attempt: number;
+    failed_worker_id: number;
+  }): Promise<void> {
+    const { restart_attempt, failed_worker_id } = params;
+
+    if (this.lifecycle_state !== 'running') {
+      return;
+    }
+
+    const restart_delay_ms = this.getRestartDelayMs({ restart_attempt });
+    this.emitParentWorkerEvent({
+      worker_id: failed_worker_id,
+      event_name: 'worker_restart_scheduled',
+      severity: 'warn',
+      details: {
+        restart_attempt,
+        restart_delay_ms
+      }
+    });
+
+    await this.waitForMs({ delay_ms: restart_delay_ms });
 
     if (this.lifecycle_state !== 'running') {
       return;
@@ -2179,8 +2758,31 @@ export class WorkerProcedureCall {
 
     try {
       await this.createWorker({ restart_attempt });
+      const replacement_worker = Array.from(this.worker_state_by_id.values()).find(
+        (worker_state): boolean => {
+          return worker_state.restart_attempt === restart_attempt;
+        }
+      );
+
+      this.emitParentWorkerEvent({
+        worker_id: replacement_worker?.worker_id ?? failed_worker_id,
+        event_name: 'worker_restart_completed',
+        severity: 'info',
+        details: {
+          restart_attempt
+        }
+      });
     } catch {
       if (restart_attempt >= this.max_restarts_per_worker) {
+        this.emitParentWorkerEvent({
+          worker_id: failed_worker_id,
+          event_name: 'worker_restart_failed',
+          severity: 'error',
+          details: {
+            restart_attempt,
+            exhausted: true
+          }
+        });
         return;
       }
 
@@ -2188,7 +2790,20 @@ export class WorkerProcedureCall {
         return;
       }
 
-      void this.restartWorker({ restart_attempt: restart_attempt + 1 });
+      this.emitParentWorkerEvent({
+        worker_id: failed_worker_id,
+        event_name: 'worker_restart_failed',
+        severity: 'warn',
+        details: {
+          restart_attempt,
+          exhausted: false
+        }
+      });
+
+      void this.restartWorker({
+        restart_attempt: restart_attempt + 1,
+        failed_worker_id
+      });
     }
   }
 

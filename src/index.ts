@@ -12,6 +12,11 @@ export {
   type undefine_worker_dependency_params_t,
   type undefine_worker_function_params_t,
   type worker_call_proxy_t,
+  type worker_event_listener_t,
+  type worker_event_severity_t,
+  type worker_event_t,
   type worker_function_handler_t,
+  type worker_health_information_t,
+  type worker_health_state_t,
   type workerprocedurecall_constructor_params_t
 } from './classes/workerprocedurecall/WorkerProcedureCall.class';

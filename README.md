@@ -19,7 +19,16 @@ import { WorkerProcedureCall } from '@opsimathically/workerprocedurecall';
     control_timeout_ms: 10_000,
     restart_on_failure: true,
     max_restarts_per_worker: 3,
-    max_pending_calls_per_worker: 1_000
+    max_pending_calls_per_worker: 1_000,
+    restart_base_delay_ms: 100,
+    restart_max_delay_ms: 5_000,
+    restart_jitter_ms: 100
+  });
+
+  const worker_event_listener_id = workerprocedurecall.onWorkerEvent({
+    listener: (worker_event) => {
+      console.log('Worker event:', worker_event);
+    }
   });
 
   // Optional constants for worker functions.
@@ -82,6 +91,7 @@ import { WorkerProcedureCall } from '@opsimathically/workerprocedurecall';
 
   await workerprocedurecall.undefineWorkerDependency({ alias: 'crypto_dep' });
   await workerprocedurecall.undefineWokerFunction({ name: 'WPCFunction2' });
+  workerprocedurecall.offWorkerEvent({ listener_id: worker_event_listener_id });
 
   await workerprocedurecall.stopWorkers();
 })();
@@ -94,6 +104,32 @@ import { WorkerProcedureCall } from '@opsimathically/workerprocedurecall';
 - Only registered aliases are accessible (allowlist model).
 - Worker runtime resolves modules using `require(...)`, then falls back to dynamic `import(...)`.
 - Module results are cached in each worker's dependency registry.
+
+## Resilience Model
+
+- Worker runtime catches command/call failures and reports them as `worker_event` messages.
+- Global worker guards are enabled:
+  - `process.on('uncaughtException', ...)`
+  - `process.on('unhandledRejection', ...)`
+- Parent thread exposes callback subscription:
+  - `onWorkerEvent({ listener })`
+  - `offWorkerEvent({ listener_id })`
+- Parent-side supervisor restarts failed workers with bounded retry + exponential backoff + jitter.
+- Scheduler avoids workers not in `ready` health state.
+- Worker health can be inspected via `getWorkerHealthStates()`.
+- Unavoidable failures still exist (OOM/native abort/SIGKILL/runtime fatal failures) and cannot always be recovered in-process.
+
+### Worker Event Shape
+
+- `event_id: string`
+- `worker_id: number`
+- `source: 'worker' | 'parent'`
+- `event_name: string`
+- `severity: 'info' | 'warn' | 'error'`
+- `timestamp: string`
+- `correlation_id?: string`
+- `error?: { name, message, stack? }`
+- `details?: Record<string, unknown>`
 
 ## How Constants Work
 
@@ -113,6 +149,10 @@ import { WorkerProcedureCall } from '@opsimathically/workerprocedurecall';
 - Scheduling is least in-flight across eligible workers, with deterministic tie-breaking.
 - Calls are dispatched only to workers that are ready and have function + required dependency/constant installation confirmed.
 - Optional per-worker saturation protection is available with `max_pending_calls_per_worker`.
+- Restart pacing is configurable with:
+  - `restart_base_delay_ms`
+  - `restart_max_delay_ms`
+  - `restart_jitter_ms`
 
 ## Public Methods
 
@@ -131,6 +171,9 @@ import { WorkerProcedureCall } from '@opsimathically/workerprocedurecall';
 
 - `startWorkers({ count, ...options })`
 - `stopWorkers()`
+- `onWorkerEvent({ listener })`
+- `offWorkerEvent({ listener_id })`
+- `getWorkerHealthStates()`
 
 ## Function Serialization and Dependency Limitations
 

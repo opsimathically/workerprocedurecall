@@ -36,6 +36,47 @@ async function WaitForSuccessfulCall(params: {
   );
 }
 
+async function WaitForWorkerEvent(params: {
+  workerprocedurecall: WorkerProcedureCall;
+  timeout_ms: number;
+  predicate: (worker_event: {
+    event_name: string;
+    severity: string;
+    error?: { message: string };
+    details?: Record<string, unknown>;
+    source: string;
+  }) => boolean;
+}): Promise<{
+  event_name: string;
+  severity: string;
+  error?: { message: string };
+  details?: Record<string, unknown>;
+  source: string;
+}> {
+  const { workerprocedurecall, timeout_ms, predicate } = params;
+
+  return await new Promise((resolve, reject): void => {
+    let listener_id = 0;
+
+    const timeout_handle = setTimeout((): void => {
+      workerprocedurecall.offWorkerEvent({ listener_id });
+      reject(new Error(`Timed out waiting for worker event after ${timeout_ms}ms.`));
+    }, timeout_ms);
+
+    listener_id = workerprocedurecall.onWorkerEvent({
+      listener: (worker_event): void => {
+        if (!predicate(worker_event)) {
+          return;
+        }
+
+        clearTimeout(timeout_handle);
+        workerprocedurecall.offWorkerEvent({ listener_id });
+        resolve(worker_event);
+      }
+    });
+  });
+}
+
 test('define before start installs on start and supports calls', async function () {
   const workerprocedurecall = new WorkerProcedureCall();
 
@@ -246,6 +287,180 @@ test('call timeout rejects when worker call exceeds configured timeout', async f
   }
 });
 
+test('define-function eval failures are reported as events and worker stays alive', async function () {
+  const workerprocedurecall = new WorkerProcedureCall();
+
+  try {
+    await workerprocedurecall.startWorkers({ count: 1 });
+
+    const failed_define_event_promise = WaitForWorkerEvent({
+      workerprocedurecall,
+      timeout_ms: 4_000,
+      predicate: (worker_event): boolean => {
+        return (
+          worker_event.event_name === 'control_command_failed' &&
+          worker_event.details?.command === 'define_function'
+        );
+      }
+    });
+
+    await assert.rejects(async function (): Promise<void> {
+      await workerprocedurecall.defineWorkerFunction({
+        name: 'WPCFunctionNativeInvalid',
+        worker_func: Math.max as unknown as () => number
+      });
+    }, /Failed to install function/i);
+
+    const failed_define_event = await failed_define_event_promise;
+    assert.equal(failed_define_event.source, 'worker');
+    assert.equal(failed_define_event.severity, 'error');
+
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'WPCFunctionAfterDefineFailure',
+      worker_func: async function (): Promise<string> {
+        return 'alive_after_define_failure';
+      }
+    });
+
+    assert.equal(
+      await workerprocedurecall.call.WPCFunctionAfterDefineFailure(),
+      'alive_after_define_failure'
+    );
+  } finally {
+    await workerprocedurecall.stopWorkers();
+  }
+});
+
+test('call errors are reported and worker remains callable', async function () {
+  const workerprocedurecall = new WorkerProcedureCall();
+
+  try {
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'WPCFunctionSyncThrow',
+      worker_func: function (): string {
+        throw new Error('sync throw marker');
+      }
+    });
+
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'WPCFunctionHealthy',
+      worker_func: async function (): Promise<string> {
+        return 'healthy';
+      }
+    });
+
+    await workerprocedurecall.startWorkers({ count: 1 });
+
+    const call_failure_event_promise = WaitForWorkerEvent({
+      workerprocedurecall,
+      timeout_ms: 4_000,
+      predicate: (worker_event): boolean => {
+        return (
+          worker_event.event_name === 'call_execution_failed' &&
+          /sync throw marker/i.test(worker_event.error?.message ?? '')
+        );
+      }
+    });
+
+    await assert.rejects(async function (): Promise<unknown> {
+      return await workerprocedurecall.call.WPCFunctionSyncThrow();
+    }, /sync throw marker/i);
+
+    await call_failure_event_promise;
+    assert.equal(await workerprocedurecall.call.WPCFunctionHealthy(), 'healthy');
+  } finally {
+    await workerprocedurecall.stopWorkers();
+  }
+});
+
+test('unhandled promise rejections are emitted as worker events and worker survives', async function () {
+  const workerprocedurecall = new WorkerProcedureCall();
+
+  try {
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'WPCFunctionUnhandledRejection',
+      worker_func: async function (): Promise<string> {
+        Promise.reject(new Error('unhandled rejection marker'));
+        return 'function_returned';
+      }
+    });
+
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'WPCFunctionAfterUnhandledRejection',
+      worker_func: async function (): Promise<string> {
+        return 'still_alive';
+      }
+    });
+
+    await workerprocedurecall.startWorkers({ count: 1 });
+
+    const unhandled_rejection_event_promise = WaitForWorkerEvent({
+      workerprocedurecall,
+      timeout_ms: 4_000,
+      predicate: (worker_event): boolean => {
+        return (
+          worker_event.event_name === 'unhandled_rejection' &&
+          /unhandled rejection marker/i.test(worker_event.error?.message ?? '')
+        );
+      }
+    });
+
+    assert.equal(
+      await workerprocedurecall.call.WPCFunctionUnhandledRejection(),
+      'function_returned'
+    );
+
+    await unhandled_rejection_event_promise;
+    assert.equal(
+      await workerprocedurecall.call.WPCFunctionAfterUnhandledRejection(),
+      'still_alive'
+    );
+  } finally {
+    await workerprocedurecall.stopWorkers();
+  }
+});
+
+test('malformed parent payloads are reported and message loop remains alive', async function () {
+  const workerprocedurecall = new WorkerProcedureCall();
+
+  try {
+    await workerprocedurecall.startWorkers({ count: 1 });
+
+    const malformed_message_event_promise = WaitForWorkerEvent({
+      workerprocedurecall,
+      timeout_ms: 4_000,
+      predicate: (worker_event): boolean => {
+        return worker_event.event_name === 'malformed_parent_message';
+      }
+    });
+
+    const worker_state_by_id = (
+      workerprocedurecall as unknown as {
+        worker_state_by_id: Map<number, { worker_instance: { postMessage: (value: unknown) => void } }>;
+      }
+    ).worker_state_by_id;
+
+    const worker_state = Array.from(worker_state_by_id.values())[0];
+    worker_state.worker_instance.postMessage('malformed_payload');
+
+    await malformed_message_event_promise;
+
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'WPCFunctionAfterMalformedMessage',
+      worker_func: async function (): Promise<string> {
+        return 'loop_alive';
+      }
+    });
+
+    assert.equal(
+      await workerprocedurecall.call.WPCFunctionAfterMalformedMessage(),
+      'loop_alive'
+    );
+  } finally {
+    await workerprocedurecall.stopWorkers();
+  }
+});
+
 test('define dependency before start supports import-like loading in worker', async function () {
   const workerprocedurecall = new WorkerProcedureCall();
 
@@ -366,6 +581,17 @@ test('dependency load failures report worker and module details', async function
   try {
     await workerprocedurecall.startWorkers({ count: 1 });
 
+    const dependency_failure_event_promise = WaitForWorkerEvent({
+      workerprocedurecall,
+      timeout_ms: 4_000,
+      predicate: (worker_event): boolean => {
+        return (
+          worker_event.event_name === 'control_command_failed' &&
+          worker_event.details?.command === 'define_dependency'
+        );
+      }
+    });
+
     await assert.rejects(
       async function (): Promise<void> {
         await workerprocedurecall.defineWorkerDependency({
@@ -384,6 +610,10 @@ test('dependency load failures report worker and module details', async function
         return true;
       }
     );
+
+    const dependency_failure_event = await dependency_failure_event_promise;
+    assert.equal(dependency_failure_event.source, 'worker');
+    assert.equal(dependency_failure_event.severity, 'error');
   } finally {
     await workerprocedurecall.stopWorkers();
   }
@@ -418,6 +648,22 @@ test('worker restart rehydrates dependencies for dependent calls', async functio
 
     await workerprocedurecall.startWorkers({ count: 1 });
 
+    const restart_scheduled_event_promise = WaitForWorkerEvent({
+      workerprocedurecall,
+      timeout_ms: 5_000,
+      predicate: (worker_event): boolean => {
+        return worker_event.event_name === 'worker_restart_scheduled';
+      }
+    });
+
+    const restart_completed_event_promise = WaitForWorkerEvent({
+      workerprocedurecall,
+      timeout_ms: 6_000,
+      predicate: (worker_event): boolean => {
+        return worker_event.event_name === 'worker_restart_completed';
+      }
+    });
+
     assert.equal(
       await workerprocedurecall.call.WPCFunctionDependencyAfterRestart({
         input: '/tmp/restart.txt'
@@ -429,6 +675,9 @@ test('worker restart rehydrates dependencies for dependent calls', async functio
       return await workerprocedurecall.call.WPCFunctionCrashWorker();
     });
 
+    await restart_scheduled_event_promise;
+    await restart_completed_event_promise;
+
     const return_val = await WaitForSuccessfulCall({
       workerprocedurecall,
       function_name: 'WPCFunctionDependencyAfterRestart',
@@ -438,6 +687,10 @@ test('worker restart rehydrates dependencies for dependent calls', async functio
     });
 
     assert.equal(return_val, 'restart_after.txt');
+
+    const worker_health_states = workerprocedurecall.getWorkerHealthStates();
+    assert.equal(worker_health_states.length, 1);
+    assert.equal(worker_health_states[0].health_state, 'ready');
   } finally {
     await workerprocedurecall.stopWorkers();
   }
