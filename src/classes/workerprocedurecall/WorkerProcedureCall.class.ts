@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
 
 type lifecycle_state_t = 'stopped' | 'starting' | 'running' | 'stopping';
@@ -72,6 +73,7 @@ export type remote_error_t = {
 export type remote_function_information_t = {
   name: string;
   parameter_signature: string | null;
+  function_hash_sha1: string;
   installed_worker_count: number;
 };
 
@@ -96,6 +98,8 @@ type worker_function_definition_t = {
   name: string;
   worker_func: worker_function_handler_t<any, any>;
   function_source: string;
+  normalized_function_source: string;
+  function_hash_sha1: string;
   parameter_signature: string | null;
   required_dependency_aliases: Set<string>;
   required_constant_names: Set<string>;
@@ -307,6 +311,23 @@ function ParseParameterSignature(params: {
   }
 
   return arrow_parameter_match[1].trim();
+}
+
+function NormalizeFunctionSourceForHash(params: { function_source: string }): string {
+  const { function_source } = params;
+
+  // Normalize line endings and boundary whitespace for deterministic hashing.
+  return function_source.replace(/\r\n?/g, '\n').trim();
+}
+
+function ComputeFunctionHashSha1(params: { function_source: string }): string {
+  const { function_source } = params;
+
+  const normalized_function_source = NormalizeFunctionSourceForHash({
+    function_source
+  });
+
+  return createHash('sha1').update(normalized_function_source, 'utf8').digest('hex');
 }
 
 function ValidateIdentifier(params: { value: string; label: string }): void {
@@ -734,6 +755,10 @@ export class WorkerProcedureCall {
       throw new Error(`Function "${name}" could not be serialized.`);
     }
 
+    const normalized_function_source = NormalizeFunctionSourceForHash({
+      function_source
+    });
+    const function_hash_sha1 = ComputeFunctionHashSha1({ function_source });
     const parameter_signature = ParseParameterSignature({ function_source });
     const required_dependency_aliases = ParseStringLiteralDependencies({
       function_source
@@ -745,7 +770,8 @@ export class WorkerProcedureCall {
     const existing_definition = this.function_definition_by_name.get(name);
     if (
       existing_definition &&
-      existing_definition.function_source === function_source
+      existing_definition.normalized_function_source === normalized_function_source &&
+      existing_definition.function_hash_sha1 === function_hash_sha1
     ) {
       return;
     }
@@ -755,6 +781,8 @@ export class WorkerProcedureCall {
         name,
         worker_func,
         function_source,
+        normalized_function_source,
+        function_hash_sha1,
         parameter_signature,
         required_dependency_aliases,
         required_constant_names,
@@ -763,6 +791,8 @@ export class WorkerProcedureCall {
 
     updated_definition.worker_func = worker_func;
     updated_definition.function_source = function_source;
+    updated_definition.normalized_function_source = normalized_function_source;
+    updated_definition.function_hash_sha1 = function_hash_sha1;
     updated_definition.parameter_signature = parameter_signature;
     updated_definition.required_dependency_aliases = required_dependency_aliases;
     updated_definition.required_constant_names = required_constant_names;
@@ -1079,6 +1109,7 @@ export class WorkerProcedureCall {
         return {
           name: function_definition.name,
           parameter_signature: function_definition.parameter_signature,
+          function_hash_sha1: function_definition.function_hash_sha1,
           installed_worker_count: function_definition.installed_worker_ids.size
         };
       });

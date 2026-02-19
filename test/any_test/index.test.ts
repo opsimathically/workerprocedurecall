@@ -62,6 +62,7 @@ test('define before start installs on start and supports calls', async function 
 
     assert.equal(found_function?.installed_worker_count, 2);
     assert.equal(found_function?.parameter_signature, 'params');
+    assert.match(found_function?.function_hash_sha1 ?? '', /^[a-f0-9]{40}$/);
   } finally {
     await workerprocedurecall.stopWorkers();
   }
@@ -92,6 +93,59 @@ test('define after start installs across existing workers', async function () {
     });
 
     assert.equal(found_function?.installed_worker_count, 3);
+  } finally {
+    await workerprocedurecall.stopWorkers();
+  }
+});
+
+test('function hash is stable for unchanged source and changes when redefined', async function () {
+  const workerprocedurecall = new WorkerProcedureCall();
+
+  try {
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'WPCFunctionHash',
+      worker_func: async function (): Promise<string> {
+        return 'hash_v1';
+      }
+    });
+
+    await workerprocedurecall.startWorkers({ count: 1 });
+
+    const first_metadata = await workerprocedurecall.getRemoteFunctions();
+    const first_hash = first_metadata.find((function_definition) => {
+      return function_definition.name === 'WPCFunctionHash';
+    })?.function_hash_sha1;
+
+    assert.equal(await workerprocedurecall.call.WPCFunctionHash(), 'hash_v1');
+
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'WPCFunctionHash',
+      worker_func: async function (): Promise<string> {
+        return 'hash_v1';
+      }
+    });
+
+    const second_metadata = await workerprocedurecall.getRemoteFunctions();
+    const second_hash = second_metadata.find((function_definition) => {
+      return function_definition.name === 'WPCFunctionHash';
+    })?.function_hash_sha1;
+
+    assert.equal(second_hash, first_hash);
+
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'WPCFunctionHash',
+      worker_func: async function (): Promise<string> {
+        return 'hash_v2';
+      }
+    });
+
+    const third_metadata = await workerprocedurecall.getRemoteFunctions();
+    const third_hash = third_metadata.find((function_definition) => {
+      return function_definition.name === 'WPCFunctionHash';
+    })?.function_hash_sha1;
+
+    assert.notEqual(third_hash, first_hash);
+    assert.equal(await workerprocedurecall.call.WPCFunctionHash(), 'hash_v2');
   } finally {
     await workerprocedurecall.stopWorkers();
   }

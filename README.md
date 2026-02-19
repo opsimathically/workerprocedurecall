@@ -69,6 +69,7 @@ import { WorkerProcedureCall } from '@opsimathically/workerprocedurecall';
   const dependency_information = await workerprocedurecall.getWorkerDependencies();
   const constant_information = await workerprocedurecall.getWorkerConstants();
 
+  // Each function metadata entry includes function_hash_sha1.
   console.log(remote_function_information, dependency_information, constant_information);
 
   const function1_return_val = await workerprocedurecall.call.WPCFunction1(
@@ -104,6 +105,7 @@ import { WorkerProcedureCall } from '@opsimathically/workerprocedurecall';
 
 - Parent thread is the source of truth for functions, dependencies, and constants.
 - Functions, dependencies, and constants can be defined before startup or while workers are running.
+- Function metadata includes `function_hash_sha1` so callers can detect function version drift.
 - New workers (including restarted workers) receive full registry synchronization on startup.
 - Calls use request/response correlation IDs and timeout handling.
 - Worker errors are propagated with `name`, `message`, and `stack` when available.
@@ -133,6 +135,7 @@ import { WorkerProcedureCall } from '@opsimathically/workerprocedurecall';
 ## Function Serialization and Dependency Limitations
 
 - Worker functions are serialized using `worker_func.toString()` and evaluated in workers.
+- `function_hash_sha1` is computed from a normalized source (`toString()` with normalized line endings and trimmed boundary whitespace), then SHA-1 hashed.
 - Worker functions must be self-contained and must not rely on parent closure state.
 - Dependency detection for scheduling currently uses static string-literal patterns:
   - `wpc_import('alias')`
@@ -140,6 +143,17 @@ import { WorkerProcedureCall } from '@opsimathically/workerprocedurecall';
   - `context.dependencies.alias`
   - `context.constants.NAME`
 - Dynamically computed alias/name values still work at runtime, but may not be recognized in pre-dispatch dependency eligibility checks.
+
+## Hash Drift Check Pattern
+
+```typescript
+const remote_functions = await workerprocedurecall.getRemoteFunctions();
+const remote_hash = remote_functions.find((f) => f.name === 'WPCFunction1')?.function_hash_sha1;
+
+if (remote_hash !== expected_hash_sha1) {
+  console.log('Remote function is outdated or changed.');
+}
+```
 
 ## Building from Source
 
