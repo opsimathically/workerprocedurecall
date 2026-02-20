@@ -1,6 +1,6 @@
 {
   "name": "@opsimathically/workerprocedurecall",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Worker-thread RPC for Node.js with dynamic function, dependency, and constant registration via message passing.",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
