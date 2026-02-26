@@ -43,6 +43,17 @@ import { WorkerProcedureCall } from '@opsimathically/workerprocedurecall';
     module_specifier: 'node:path'
   });
 
+  await workerprocedurecall.defineDatabaseConnection({
+    name: 'sqlite_main',
+    connector: {
+      type: 'sqlite',
+      semantics: {
+        filename: ':memory:',
+        driver: 'better-sqlite3'
+      }
+    }
+  });
+
   await workerprocedurecall.defineWorkerFunction({
     name: 'WPCFunction1',
     worker_func: async function (file_path: string): Promise<string> {
@@ -74,21 +85,50 @@ import { WorkerProcedureCall } from '@opsimathically/workerprocedurecall';
     }
   });
 
+  await workerprocedurecall.defineWorkerFunction({
+    name: 'WPCFunctionDb',
+    worker_func: async function (record_name: string): Promise<number> {
+      const sqlite_database = await wpc_database_connection('sqlite_main');
+
+      sqlite_database.exec(
+        'CREATE TABLE IF NOT EXISTS records (record_name TEXT NOT NULL)'
+      );
+
+      sqlite_database.prepare('INSERT INTO records (record_name) VALUES (?)').run(
+        record_name
+      );
+      const row = sqlite_database
+        .prepare('SELECT COUNT(*) as total_record_count FROM records')
+        .get() as { total_record_count: number };
+
+      return row.total_record_count;
+    }
+  });
+
   const remote_function_information = await workerprocedurecall.getRemoteFunctions();
   const dependency_information = await workerprocedurecall.getWorkerDependencies();
   const constant_information = await workerprocedurecall.getWorkerConstants();
+  const database_connection_information =
+    await workerprocedurecall.getWorkerDatabaseConnections();
 
   // Each function metadata entry includes function_hash_sha1.
-  console.log(remote_function_information, dependency_information, constant_information);
+  console.log(
+    remote_function_information,
+    dependency_information,
+    constant_information,
+    database_connection_information
+  );
 
   const function1_return_val = await workerprocedurecall.call.WPCFunction1(
     '/tmp/example.txt'
   );
 
   const function2_return_val = await workerprocedurecall.call.WPCFunction2();
+  const function_db_return_val = await workerprocedurecall.call.WPCFunctionDb('alpha');
 
-  console.log(function1_return_val, function2_return_val);
+  console.log(function1_return_val, function2_return_val, function_db_return_val);
 
+  await workerprocedurecall.undefineDatabaseConnection({ name: 'sqlite_main' });
   await workerprocedurecall.undefineWorkerDependency({ alias: 'crypto_dep' });
   await workerprocedurecall.undefineWokerFunction({ name: 'WPCFunction2' });
   workerprocedurecall.offWorkerEvent({ listener_id: worker_event_listener_id });
@@ -137,17 +177,119 @@ import { WorkerProcedureCall } from '@opsimathically/workerprocedurecall';
 - In worker functions, call `wpc_constant('NAME')`.
 - Constants can be added/updated/removed before or after workers start.
 
+## How Database Connections Work
+
+- Use `defineDatabaseConnection({ name, connector: { type, semantics } })`.
+- Connections are created when each worker installs the definition.
+- If any worker fails to connect, the define/start operation fails with worker + connector details.
+- In worker functions, call `await wpc_database_connection('name')`.
+- For typed handles without casts, add a project-level `.d.ts` map for known connection names (for example `wpc_database_connection_handles.d.ts`):
+  ```typescript
+  import type { Database as better_sqlite3_database_t } from 'better-sqlite3';
+
+  declare global {
+    interface wpc_database_connection_handle_by_name_i {
+      sqlite_main: better_sqlite3_database_t;
+    }
+  }
+
+  export {};
+  ```
+- For custom type overrides, augment either:
+  - `wpc_database_connection_handle_by_name_i` (name-specific handle type)
+  - `wpc_database_connector_handle_overrides_i` (connector-type handle override)
+- Connections are kept in each worker and reused across calls.
+- On connection loss, worker runtime marks the connection unavailable and reconnects on next access.
+- Connections are closed on undefine and on worker shutdown.
+
+### Connector Semantics Examples
+
+```typescript
+await workerprocedurecall.defineDatabaseConnection({
+  name: 'mongodb_main',
+  connector: {
+    type: 'mongodb',
+    semantics: {
+      uri: 'mongodb://127.0.0.1:27017',
+      database_name: 'app_db',
+      client_options: {
+        maxPoolSize: 10
+      }
+    }
+  }
+});
+
+await workerprocedurecall.defineDatabaseConnection({
+  name: 'postgresql_main',
+  connector: {
+    type: 'postgresql',
+    semantics: {
+      connection_string: 'postgresql://user:password@127.0.0.1:5432/app_db',
+      use_pool: true,
+      pool_options: {
+        max: 10
+      }
+    }
+  }
+});
+
+await workerprocedurecall.defineDatabaseConnection({
+  name: 'mysql_main',
+  connector: {
+    type: 'mysql',
+    semantics: {
+      use_pool: true,
+      pool_options: {
+        host: '127.0.0.1',
+        port: 3306,
+        user: 'user',
+        password: 'password',
+        database: 'app_db'
+      }
+    }
+  }
+});
+
+await workerprocedurecall.defineDatabaseConnection({
+  name: 'mariadb_main',
+  connector: {
+    type: 'mariadb',
+    semantics: {
+      use_pool: true,
+      pool_options: {
+        host: '127.0.0.1',
+        port: 3306,
+        user: 'user',
+        password: 'password',
+        database: 'app_db'
+      }
+    }
+  }
+});
+
+await workerprocedurecall.defineDatabaseConnection({
+  name: 'sqlite_main',
+  connector: {
+    type: 'sqlite',
+    semantics: {
+      filename: ':memory:',
+      driver: 'better-sqlite3'
+    }
+  }
+});
+```
+
 ## Behavior Notes
 
-- Parent thread is the source of truth for functions, dependencies, and constants.
-- Functions, dependencies, and constants can be defined before startup or while workers are running.
+- Parent thread is the source of truth for functions, dependencies, constants, and database connections.
+- Functions, dependencies, constants, and database connections can be defined before startup or while workers are running.
 - Function metadata includes `function_hash_sha1` so callers can detect function version drift.
 - New workers (including restarted workers) receive full registry synchronization on startup.
 - Calls use request/response correlation IDs and timeout handling.
 - Worker errors are propagated with `name`, `message`, and `stack` when available.
 - Worker shutdown is graceful first, then force-terminate fallback on timeout.
 - Scheduling is least in-flight across eligible workers, with deterministic tie-breaking.
-- Calls are dispatched only to workers that are ready and have function + required dependency/constant installation confirmed.
+- Calls are dispatched only to workers that are ready and have function + required dependency/constant/database connection installation confirmed.
 - Optional per-worker saturation protection is available with `max_pending_calls_per_worker`.
 - Restart pacing is configurable with:
   - `restart_base_delay_ms`
@@ -169,6 +311,10 @@ import { WorkerProcedureCall } from '@opsimathically/workerprocedurecall';
 - `undefineWorkerConstant({ name })`
 - `getWorkerConstants()`
 
+- `defineDatabaseConnection({ name, connector: { type, semantics } })`
+- `undefineDatabaseConnection({ name })`
+- `getWorkerDatabaseConnections()`
+
 - `startWorkers({ count, ...options })`
 - `stopWorkers()`
 - `onWorkerEvent({ listener })`
@@ -183,9 +329,16 @@ import { WorkerProcedureCall } from '@opsimathically/workerprocedurecall';
 - Dependency detection for scheduling currently uses static string-literal patterns:
   - `wpc_import('alias')`
   - `wpc_constant('NAME')`
+  - `wpc_database_connection('NAME')`
   - `context.dependencies.alias`
   - `context.constants.NAME`
+  - `context.database_connections.NAME`
 - Dynamically computed alias/name values still work at runtime, but may not be recognized in pre-dispatch dependency eligibility checks.
+
+## Migration Note
+
+- `defineDatabaseConnection`, `undefineDatabaseConnection`, and `getWorkerDatabaseConnections` are new public APIs.
+- Worker functions can now access connection handles through `await wpc_database_connection('NAME')`.
 
 ## Hash Drift Check Pattern
 

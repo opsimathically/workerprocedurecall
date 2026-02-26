@@ -3,8 +3,12 @@ import test from 'node:test';
 
 import { WorkerProcedureCall } from '../../src/index';
 
-declare function wpc_import(alias: string): Promise<unknown>;
-declare function wpc_constant(name: string): unknown;
+declare global {
+  interface wpc_database_connection_type_by_name_i {
+    sqlite_connection_1: 'sqlite';
+    database_connection_to_remove: 'sqlite';
+  }
+}
 
 async function WaitForSuccessfulCall(params: {
   workerprocedurecall: WorkerProcedureCall;
@@ -720,6 +724,201 @@ test('worker constants can be defined and consumed in worker functions', async f
     );
 
     assert.equal(return_val, 'hello, world');
+  } finally {
+    await workerprocedurecall.stopWorkers();
+  }
+});
+
+test('sqlite database connection can be defined and consumed by worker functions', async function () {
+  const workerprocedurecall = new WorkerProcedureCall();
+
+  try {
+    await workerprocedurecall.defineDatabaseConnection({
+      name: 'sqlite_connection_1',
+      connector: {
+        type: 'sqlite',
+        semantics: {
+          filename: ':memory:',
+          driver: 'better-sqlite3'
+        }
+      }
+    });
+
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'WPCFunctionWithDatabaseConnection',
+      worker_func: async function (params: { record_name: string }): Promise<number> {
+        const sqlite_database = await wpc_database_connection('sqlite_connection_1');
+
+        sqlite_database.exec(
+          'CREATE TABLE IF NOT EXISTS records (record_name TEXT NOT NULL)'
+        );
+
+        const insert_statement = sqlite_database.prepare(
+          'INSERT INTO records (record_name) VALUES (?)'
+        );
+        insert_statement.run(params.record_name);
+
+        const count_statement = sqlite_database.prepare(
+          'SELECT COUNT(*) as total_record_count FROM records'
+        );
+        const count_row = count_statement.get() as { total_record_count: number };
+
+        return count_row.total_record_count;
+      }
+    });
+
+    await workerprocedurecall.startWorkers({ count: 1 });
+
+    const first_count = await workerprocedurecall.call.WPCFunctionWithDatabaseConnection({
+      record_name: 'alpha'
+    });
+    const second_count = await workerprocedurecall.call.WPCFunctionWithDatabaseConnection({
+      record_name: 'beta'
+    });
+
+    assert.equal(first_count, 1);
+    assert.equal(second_count, 2);
+
+    const database_connection_information =
+      await workerprocedurecall.getWorkerDatabaseConnections();
+    const found_database_connection = database_connection_information.find(
+      (database_connection_definition) => {
+        return database_connection_definition.name === 'sqlite_connection_1';
+      }
+    );
+
+    assert.equal(found_database_connection?.connector_type, 'sqlite');
+    assert.equal(found_database_connection?.installed_worker_count, 1);
+  } finally {
+    await workerprocedurecall.stopWorkers();
+  }
+});
+
+test('duplicate database connection names are rejected', async function () {
+  const workerprocedurecall = new WorkerProcedureCall();
+
+  try {
+    await workerprocedurecall.defineDatabaseConnection({
+      name: 'duplicate_database_connection_name',
+      connector: {
+        type: 'sqlite',
+        semantics: {
+          filename: ':memory:'
+        }
+      }
+    });
+
+    await assert.rejects(async function (): Promise<void> {
+      await workerprocedurecall.defineDatabaseConnection({
+        name: 'duplicate_database_connection_name',
+        connector: {
+          type: 'sqlite',
+          semantics: {
+            filename: ':memory:'
+          }
+        }
+      });
+    }, /already defined/i);
+  } finally {
+    await workerprocedurecall.stopWorkers();
+  }
+});
+
+test('invalid database connector types are rejected', async function () {
+  const workerprocedurecall = new WorkerProcedureCall();
+
+  try {
+    await assert.rejects(async function (): Promise<void> {
+      await workerprocedurecall.defineDatabaseConnection({
+        name: 'bad_database_connector',
+        connector: {
+          type: 'oracle' as unknown as 'sqlite',
+          semantics: {
+            filename: ':memory:'
+          }
+        }
+      });
+    }, /must be one of/i);
+  } finally {
+    await workerprocedurecall.stopWorkers();
+  }
+});
+
+test('database connection failures include connection name and connector type', async function () {
+  const workerprocedurecall = new WorkerProcedureCall();
+
+  try {
+    await workerprocedurecall.startWorkers({ count: 1 });
+
+    await assert.rejects(
+      async function (): Promise<void> {
+        await workerprocedurecall.defineDatabaseConnection({
+          name: 'failing_postgresql_connection',
+          connector: {
+            type: 'postgresql',
+            semantics: {
+              connection_string:
+                'postgresql://user:password@127.0.0.1:1/nonexistent_database',
+              pool_options: {
+                connectionTimeoutMillis: 250
+              }
+            }
+          }
+        });
+      },
+      function (error: unknown): boolean {
+        assert(error instanceof Error);
+        assert.match(error.message, /Failed to install database connection/i);
+        assert.match(error.message, /failing_postgresql_connection/i);
+        assert.match(error.message, /\(postgresql\)/i);
+        return true;
+      }
+    );
+  } finally {
+    await workerprocedurecall.stopWorkers();
+  }
+});
+
+test('undefining a database connection prevents dependent function calls', async function () {
+  const workerprocedurecall = new WorkerProcedureCall();
+
+  try {
+    await workerprocedurecall.defineDatabaseConnection({
+      name: 'database_connection_to_remove',
+      connector: {
+        type: 'sqlite',
+        semantics: {
+          filename: ':memory:'
+        }
+      }
+    });
+
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'WPCFunctionDependsOnDatabaseConnection',
+      worker_func: async function (): Promise<number> {
+        const sqlite_database = await wpc_database_connection(
+          'database_connection_to_remove'
+        );
+
+        const select_statement = sqlite_database.prepare('SELECT 7 as value');
+        const row = select_statement.get() as { value: number };
+        return row.value;
+      }
+    });
+
+    await workerprocedurecall.startWorkers({ count: 1 });
+    assert.equal(
+      await workerprocedurecall.call.WPCFunctionDependsOnDatabaseConnection(),
+      7
+    );
+
+    await workerprocedurecall.undefineDatabaseConnection({
+      name: 'database_connection_to_remove'
+    });
+
+    await assert.rejects(async function (): Promise<unknown> {
+      return await workerprocedurecall.call.WPCFunctionDependsOnDatabaseConnection();
+    }, /requires database connection "database_connection_to_remove" which is not defined/i);
   } finally {
     await workerprocedurecall.stopWorkers();
   }

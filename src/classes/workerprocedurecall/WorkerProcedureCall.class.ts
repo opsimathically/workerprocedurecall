@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
+import type { MongoClientOptions as mongodb_client_options_t } from 'mongodb';
+import type {
+  ConnectionOptions as mysql_connection_options_t,
+  PoolOptions as mysql_pool_options_t
+} from 'mysql2/promise';
 
 type lifecycle_state_t = 'stopped' | 'starting' | 'running' | 'stopping';
 type control_command_t =
@@ -9,6 +14,8 @@ type control_command_t =
   | 'undefine_dependency'
   | 'define_constant'
   | 'undefine_constant'
+  | 'define_database_connection'
+  | 'undefine_database_connection'
   | 'shutdown';
 
 type runtime_options_t = {
@@ -63,6 +70,76 @@ export type undefine_worker_constant_params_t = {
   name: string;
 };
 
+export type database_connector_type_t =
+  | 'mongodb'
+  | 'postgresql'
+  | 'mariadb'
+  | 'mysql'
+  | 'sqlite';
+
+export type mongodb_connector_semantics_t = {
+  uri: string;
+  database_name?: string;
+  client_options?: mongodb_client_options_t;
+};
+
+export type postgresql_connector_semantics_t = {
+  connection_string?: string;
+  use_pool?: boolean;
+  pool_options?: Record<string, unknown>;
+  client_options?: Record<string, unknown>;
+};
+
+export type mysql_connector_semantics_t = {
+  use_pool?: boolean;
+  pool_options?: mysql_pool_options_t;
+  connection_options?: mysql_connection_options_t;
+};
+
+export type mariadb_connector_semantics_t = mysql_connector_semantics_t;
+
+export type sqlite_connector_driver_t = 'sqlite3' | 'better-sqlite3';
+
+export type sqlite_connector_semantics_t = {
+  filename?: string;
+  driver?: sqlite_connector_driver_t;
+  mode?: number;
+  options?: Record<string, unknown>;
+};
+
+export type database_connector_semantics_by_type_t = {
+  mongodb: mongodb_connector_semantics_t;
+  postgresql: postgresql_connector_semantics_t;
+  mariadb: mariadb_connector_semantics_t;
+  mysql: mysql_connector_semantics_t;
+  sqlite: sqlite_connector_semantics_t;
+};
+
+export type database_connector_definition_for_type_t<
+  connector_type_t extends database_connector_type_t
+> = connector_type_t extends database_connector_type_t
+  ? {
+      type: connector_type_t;
+      semantics: database_connector_semantics_by_type_t[connector_type_t];
+    }
+  : never;
+
+export type database_connector_definition_t = {
+  [connector_type in database_connector_type_t]:
+    database_connector_definition_for_type_t<connector_type>;
+}[database_connector_type_t];
+
+export type define_database_connection_params_t<
+  connector_type_t extends database_connector_type_t = database_connector_type_t
+> = {
+  name: string;
+  connector: database_connector_definition_for_type_t<connector_type_t>;
+};
+
+export type undefine_database_connection_params_t = {
+  name: string;
+};
+
 export type start_workers_params_t = runtime_options_t & {
   count: number;
 };
@@ -92,6 +169,102 @@ export type remote_constant_information_t = {
   name: string;
   installed_worker_count: number;
 };
+
+export type remote_database_connection_information_t = {
+  name: string;
+  connector_type: database_connector_type_t;
+  installed_worker_count: number;
+};
+
+export type wpc_default_database_connector_handle_by_type_t = {
+  mongodb: {
+    client: import('mongodb').MongoClient;
+    db: import('mongodb').Db | null;
+  };
+  postgresql: import('pg').Pool | import('pg').Client;
+  mariadb:
+    | import('mysql2/promise').Pool
+    | import('mysql2/promise').Connection;
+  mysql:
+    | import('mysql2/promise').Pool
+    | import('mysql2/promise').Connection;
+  sqlite: import('better-sqlite3').Database | import('sqlite3').Database;
+};
+
+export type mongodb_database_connection_handle_t =
+  wpc_default_database_connector_handle_by_type_t['mongodb'];
+
+export type postgresql_database_connection_handle_t =
+  wpc_default_database_connector_handle_by_type_t['postgresql'];
+
+export type mysql_database_connection_handle_t =
+  wpc_default_database_connector_handle_by_type_t['mysql'];
+
+export type mariadb_database_connection_handle_t =
+  wpc_default_database_connector_handle_by_type_t['mariadb'];
+
+export type better_sqlite3_database_connection_handle_t =
+  import('better-sqlite3').Database;
+
+export type better_sqlite3_statement_handle_t<
+  bind_parameters_t extends unknown[] | {} = unknown[],
+  row_t = unknown
+> = import('better-sqlite3').Statement<bind_parameters_t, row_t>;
+
+export type sqlite_database_connection_handle_t =
+  wpc_default_database_connector_handle_by_type_t['sqlite'];
+
+declare global {
+  interface wpc_database_connector_handle_overrides_i {}
+  interface wpc_database_connection_type_by_name_i {}
+  interface wpc_database_connection_handle_by_name_i {}
+}
+
+type wpc_database_connector_handle_override_key_t = Extract<
+  keyof wpc_database_connector_handle_overrides_i,
+  database_connector_type_t
+>;
+
+type wpc_database_connection_type_name_key_t = Extract<
+  keyof wpc_database_connection_type_by_name_i,
+  string
+>;
+
+type wpc_database_connection_handle_name_key_t = Extract<
+  keyof wpc_database_connection_handle_by_name_i,
+  string
+>;
+
+export type wpc_database_connector_handle_by_type_t = Omit<
+  wpc_default_database_connector_handle_by_type_t,
+  wpc_database_connector_handle_override_key_t
+> &
+  Pick<
+    wpc_database_connector_handle_overrides_i,
+    wpc_database_connector_handle_override_key_t
+  >;
+
+export type wpc_database_connection_handle_from_type_t<
+  connector_type_t extends database_connector_type_t
+> = connector_type_t extends keyof wpc_database_connector_handle_by_type_t
+  ? wpc_database_connector_handle_by_type_t[connector_type_t]
+  : unknown;
+
+type wpc_database_connection_handle_from_name_type_t<
+  connection_name_t extends wpc_database_connection_type_name_key_t
+> = wpc_database_connection_type_by_name_i[connection_name_t] extends database_connector_type_t
+  ? wpc_database_connection_handle_from_type_t<
+      wpc_database_connection_type_by_name_i[connection_name_t]
+    >
+  : unknown;
+
+export type wpc_database_connection_handle_by_name_t<
+  connection_name_t extends string
+> = connection_name_t extends wpc_database_connection_handle_name_key_t
+  ? wpc_database_connection_handle_by_name_i[connection_name_t]
+  : connection_name_t extends wpc_database_connection_type_name_key_t
+    ? wpc_database_connection_handle_from_name_type_t<connection_name_t>
+    : unknown;
 
 export type worker_health_state_t =
   | 'starting'
@@ -137,6 +310,7 @@ type worker_function_definition_t = {
   parameter_signature: string | null;
   required_dependency_aliases: Set<string>;
   required_constant_names: Set<string>;
+  required_database_connection_names: Set<string>;
   installed_worker_ids: Set<number>;
 };
 
@@ -151,6 +325,13 @@ type worker_dependency_definition_t = {
 type worker_constant_definition_t = {
   name: string;
   value: unknown;
+  installed_worker_ids: Set<number>;
+};
+
+type worker_database_connection_definition_t = {
+  name: string;
+  connector_type: database_connector_type_t;
+  semantics: Record<string, unknown>;
   installed_worker_ids: Set<number>;
 };
 
@@ -250,6 +431,9 @@ type worker_to_parent_message_t =
 declare global {
   function wpc_import(alias: string): Promise<unknown>;
   function wpc_constant(name: string): unknown;
+  function wpc_database_connection<connection_name_t extends string>(
+    name: connection_name_t
+  ): Promise<wpc_database_connection_handle_by_name_t<connection_name_t>>;
 }
 
 function ValidatePositiveInteger(params: { value: number; label: string }): void {
@@ -385,6 +569,32 @@ function ValidateIdentifier(params: { value: string; label: string }): void {
   }
 }
 
+function IsRecordObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function NormalizeDatabaseConnectorType(params: {
+  value: string;
+  label: string;
+}): database_connector_type_t {
+  const { value, label } = params;
+  const valid_connector_types: database_connector_type_t[] = [
+    'mongodb',
+    'postgresql',
+    'mariadb',
+    'mysql',
+    'sqlite'
+  ];
+
+  if (!valid_connector_types.includes(value as database_connector_type_t)) {
+    throw new Error(
+      `${label} must be one of: ${valid_connector_types.join(', ')}.`
+    );
+  }
+
+  return value as database_connector_type_t;
+}
+
 function ParseStringLiteralDependencies(params: {
   function_source: string;
 }): Set<string> {
@@ -426,6 +636,31 @@ function ParseStringLiteralConstants(params: {
   return constant_names;
 }
 
+function ParseStringLiteralDatabaseConnections(params: {
+  function_source: string;
+}): Set<string> {
+  const { function_source } = params;
+
+  const database_connection_names = new Set<string>();
+  const database_connection_call_pattern =
+    /wpc_database_connection\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\)/g;
+  const context_database_connection_pattern =
+    /context\.database_connections\.([A-Za-z_][A-Za-z0-9_]*)/g;
+
+  for (const pattern of [
+    database_connection_call_pattern,
+    context_database_connection_pattern
+  ]) {
+    let match_result = pattern.exec(function_source);
+    while (match_result) {
+      database_connection_names.add(match_result[1]);
+      match_result = pattern.exec(function_source);
+    }
+  }
+
+  return database_connection_names;
+}
+
 function BuildWorkerRuntimeScript(): string {
   return String.raw`
 const { parentPort, threadId } = require('node:worker_threads');
@@ -437,6 +672,9 @@ if (!parentPort) {
 const worker_function_registry = new Map();
 const worker_dependency_registry = new Map();
 const worker_constant_registry = new Map();
+const worker_database_connection_definition_registry = new Map();
+const worker_database_connection_registry = new Map();
+const worker_database_connection_connect_promise_by_name = new Map();
 let next_worker_event_id = 1;
 
 function GetErrorMessage(error) {
@@ -621,6 +859,527 @@ function InstallConstant(payload) {
   worker_constant_registry.set(name, value);
 }
 
+function ValidateDatabaseConnectorType(connector_type) {
+  const supported_connector_types = new Set([
+    'mongodb',
+    'postgresql',
+    'mariadb',
+    'mysql',
+    'sqlite'
+  ]);
+
+  if (!supported_connector_types.has(connector_type)) {
+    throw new Error(
+      'Database connector type must be one of: mongodb, postgresql, mariadb, mysql, sqlite.'
+    );
+  }
+}
+
+function ToRecordOrEmpty(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  return value;
+}
+
+function BuildDatabaseConnectionContext() {
+  const database_connections = {};
+
+  for (const [connection_name, connection_entry] of worker_database_connection_registry.entries()) {
+    database_connections[connection_name] = connection_entry.value;
+  }
+
+  return database_connections;
+}
+
+function TryAttachDatabaseConnectionLifecycleHooks(params) {
+  const { name, connection_entry } = params;
+
+  const handle_disconnect = function(event_name) {
+    if (!worker_database_connection_registry.has(name)) {
+      return;
+    }
+
+    worker_database_connection_registry.delete(name);
+
+    EmitWorkerEvent({
+      event_name: 'database_connection_lost',
+      severity: 'warn',
+      details: {
+        name,
+        connector_type: connection_entry.connector_type,
+        lifecycle_event: event_name
+      }
+    });
+  };
+
+  const possible_event_sources = [];
+  if (connection_entry.value && typeof connection_entry.value === 'object') {
+    possible_event_sources.push(connection_entry.value);
+  }
+
+  if (
+    connection_entry.value &&
+    typeof connection_entry.value === 'object' &&
+    connection_entry.value.client &&
+    typeof connection_entry.value.client === 'object'
+  ) {
+    possible_event_sources.push(connection_entry.value.client);
+  }
+
+  for (const event_source of possible_event_sources) {
+    if (!event_source || typeof event_source.on !== 'function') {
+      continue;
+    }
+
+    event_source.on('close', function() {
+      handle_disconnect('close');
+    });
+
+    event_source.on('end', function() {
+      handle_disconnect('end');
+    });
+
+    event_source.on('error', function() {
+      handle_disconnect('error');
+    });
+  }
+}
+
+async function CreateMongodbConnection(params) {
+  const { semantics } = params;
+
+  const uri = semantics.uri;
+  if (typeof uri !== 'string' || uri.length === 0) {
+    throw new Error('mongodb semantics.uri must be a non-empty string.');
+  }
+
+  const client_options = ToRecordOrEmpty(semantics.client_options);
+  const database_name =
+    typeof semantics.database_name === 'string' && semantics.database_name.length > 0
+      ? semantics.database_name
+      : null;
+
+  const mongodb_module = await ResolveModule('mongodb');
+  const MongoClient =
+    mongodb_module.MongoClient ||
+    (mongodb_module.default && mongodb_module.default.MongoClient);
+
+  if (typeof MongoClient !== 'function') {
+    throw new Error('mongodb module does not export MongoClient.');
+  }
+
+  const mongo_client = new MongoClient(uri, client_options);
+  await mongo_client.connect();
+
+  return {
+    value: {
+      client: mongo_client,
+      db: database_name ? mongo_client.db(database_name) : null
+    },
+    close: async function() {
+      await mongo_client.close();
+    }
+  };
+}
+
+async function CreatePostgresqlConnection(params) {
+  const { semantics } = params;
+
+  const postgresql_module = await ResolveModule('pg');
+  const PoolClass =
+    postgresql_module.Pool || (postgresql_module.default && postgresql_module.default.Pool);
+  const ClientClass =
+    postgresql_module.Client ||
+    (postgresql_module.default && postgresql_module.default.Client);
+
+  const connection_string =
+    typeof semantics.connection_string === 'string' && semantics.connection_string.length > 0
+      ? semantics.connection_string
+      : null;
+  const use_pool = semantics.use_pool !== false;
+
+  if (use_pool) {
+    const pool_options = ToRecordOrEmpty(semantics.pool_options);
+    if (connection_string) {
+      pool_options.connectionString = connection_string;
+    }
+
+    if (typeof PoolClass !== 'function') {
+      throw new Error('pg module does not export Pool.');
+    }
+
+    const postgresql_pool = new PoolClass(pool_options);
+    await postgresql_pool.query('SELECT 1');
+
+    return {
+      value: postgresql_pool,
+      close: async function() {
+        await postgresql_pool.end();
+      }
+    };
+  }
+
+  const client_options = ToRecordOrEmpty(semantics.client_options);
+  if (connection_string) {
+    client_options.connectionString = connection_string;
+  }
+
+  if (typeof ClientClass !== 'function') {
+    throw new Error('pg module does not export Client.');
+  }
+
+  const postgresql_client = new ClientClass(client_options);
+  await postgresql_client.connect();
+  await postgresql_client.query('SELECT 1');
+
+  return {
+    value: postgresql_client,
+    close: async function() {
+      await postgresql_client.end();
+    }
+  };
+}
+
+async function CreateMysqlConnection(params) {
+  const { semantics } = params;
+
+  const mysql_module = await ResolveModule('mysql2/promise');
+  const use_pool = semantics.use_pool !== false;
+
+  if (use_pool) {
+    const pool_options =
+      Object.keys(ToRecordOrEmpty(semantics.pool_options)).length > 0
+        ? ToRecordOrEmpty(semantics.pool_options)
+        : ToRecordOrEmpty(semantics.connection_options);
+
+    if (typeof mysql_module.createPool !== 'function') {
+      throw new Error('mysql2/promise does not export createPool.');
+    }
+
+    const mysql_pool = mysql_module.createPool(pool_options);
+    await mysql_pool.query('SELECT 1');
+
+    return {
+      value: mysql_pool,
+      close: async function() {
+        await mysql_pool.end();
+      }
+    };
+  }
+
+  const connection_options = ToRecordOrEmpty(semantics.connection_options);
+
+  if (typeof mysql_module.createConnection !== 'function') {
+    throw new Error('mysql2/promise does not export createConnection.');
+  }
+
+  const mysql_connection = await mysql_module.createConnection(connection_options);
+  await mysql_connection.query('SELECT 1');
+
+  return {
+    value: mysql_connection,
+    close: async function() {
+      await mysql_connection.end();
+    }
+  };
+}
+
+async function CreateSqliteConnection(params) {
+  const { semantics } = params;
+
+  const filename =
+    typeof semantics.filename === 'string' && semantics.filename.length > 0
+      ? semantics.filename
+      : ':memory:';
+  const driver =
+    typeof semantics.driver === 'string' && semantics.driver === 'sqlite3'
+      ? 'sqlite3'
+      : 'better-sqlite3';
+
+  if (driver === 'sqlite3') {
+    const sqlite3_module = await ResolveModule('sqlite3');
+    const sqlite3_export = typeof sqlite3_module.verbose === 'function'
+      ? sqlite3_module.verbose()
+      : sqlite3_module;
+    const SqliteDatabase =
+      sqlite3_export.Database ||
+      (sqlite3_export.default && sqlite3_export.default.Database);
+
+    if (typeof SqliteDatabase !== 'function') {
+      throw new Error('sqlite3 module does not export Database.');
+    }
+
+    const mode = typeof semantics.mode === 'number' ? semantics.mode : null;
+    const sqlite_database = await new Promise(function(resolve, reject) {
+      let opened_database;
+      const open_callback = function(error) {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve(opened_database);
+      };
+
+      if (typeof mode === 'number') {
+        opened_database = new SqliteDatabase(filename, mode, open_callback);
+        return;
+      }
+
+      opened_database = new SqliteDatabase(filename, open_callback);
+    });
+
+    return {
+      value: sqlite_database,
+      close: async function() {
+        await new Promise(function(resolve, reject) {
+          sqlite_database.close(function(error) {
+            if (error) {
+              reject(error);
+              return;
+            }
+
+            resolve();
+          });
+        });
+      }
+    };
+  }
+
+  const better_sqlite3_module = await ResolveModule('better-sqlite3');
+  const BetterSqliteDatabase =
+    better_sqlite3_module.default || better_sqlite3_module;
+
+  if (typeof BetterSqliteDatabase !== 'function') {
+    throw new Error('better-sqlite3 module did not resolve to a constructor.');
+  }
+
+  const sqlite_options = ToRecordOrEmpty(semantics.options);
+  const better_sqlite_database = new BetterSqliteDatabase(filename, sqlite_options);
+
+  return {
+    value: better_sqlite_database,
+    close: async function() {
+      better_sqlite_database.close();
+    }
+  };
+}
+
+async function CreateDatabaseConnectionEntry(params) {
+  const { name, connector_type, semantics } = params;
+
+  if (connector_type === 'mongodb') {
+    const mongodb_connection = await CreateMongodbConnection({ semantics });
+    return {
+      name,
+      connector_type,
+      semantics,
+      value: mongodb_connection.value,
+      close: mongodb_connection.close
+    };
+  }
+
+  if (connector_type === 'postgresql') {
+    const postgresql_connection = await CreatePostgresqlConnection({ semantics });
+    return {
+      name,
+      connector_type,
+      semantics,
+      value: postgresql_connection.value,
+      close: postgresql_connection.close
+    };
+  }
+
+  if (connector_type === 'mariadb' || connector_type === 'mysql') {
+    const mysql_connection = await CreateMysqlConnection({ semantics });
+    return {
+      name,
+      connector_type,
+      semantics,
+      value: mysql_connection.value,
+      close: mysql_connection.close
+    };
+  }
+
+  if (connector_type === 'sqlite') {
+    const sqlite_connection = await CreateSqliteConnection({ semantics });
+    return {
+      name,
+      connector_type,
+      semantics,
+      value: sqlite_connection.value,
+      close: sqlite_connection.close
+    };
+  }
+
+  throw new Error('Unsupported database connector type: ' + connector_type);
+}
+
+async function CloseDatabaseConnectionEntry(params) {
+  const { name, swallow_error } = params;
+  const existing_entry = worker_database_connection_registry.get(name);
+  if (!existing_entry) {
+    return;
+  }
+
+  worker_database_connection_registry.delete(name);
+
+  try {
+    await existing_entry.close();
+  } catch (error) {
+    if (swallow_error) {
+      EmitWorkerEvent({
+        event_name: 'database_connection_close_failed',
+        severity: 'warn',
+        error: ToRemoteError(error),
+        details: {
+          name,
+          connector_type: existing_entry.connector_type
+        }
+      });
+      return;
+    }
+
+    throw new Error(
+      'Database connection "' +
+        name +
+        '" (' +
+        existing_entry.connector_type +
+        ') failed to close: ' +
+        GetErrorMessage(error)
+    );
+  }
+}
+
+async function ConnectDatabaseConnection(params) {
+  const { name } = params;
+
+  const existing_entry = worker_database_connection_registry.get(name);
+  if (existing_entry) {
+    return existing_entry.value;
+  }
+
+  const existing_connect_promise =
+    worker_database_connection_connect_promise_by_name.get(name);
+  if (existing_connect_promise) {
+    return await existing_connect_promise;
+  }
+
+  const connect_promise = (async function() {
+    const definition = worker_database_connection_definition_registry.get(name);
+    if (!definition) {
+      throw new Error('Database connection "' + name + '" is not defined on this worker.');
+    }
+
+    try {
+      const connection_entry = await CreateDatabaseConnectionEntry({
+        name,
+        connector_type: definition.connector_type,
+        semantics: definition.semantics
+      });
+
+      worker_database_connection_registry.set(name, connection_entry);
+      TryAttachDatabaseConnectionLifecycleHooks({
+        name,
+        connection_entry
+      });
+
+      return connection_entry.value;
+    } catch (error) {
+      worker_database_connection_registry.delete(name);
+      throw new Error(
+        'Database connection "' +
+          name +
+          '" (' +
+          definition.connector_type +
+          ') failed: ' +
+          GetErrorMessage(error)
+      );
+    }
+  })();
+
+  worker_database_connection_connect_promise_by_name.set(name, connect_promise);
+
+  try {
+    return await connect_promise;
+  } finally {
+    worker_database_connection_connect_promise_by_name.delete(name);
+  }
+}
+
+async function InstallDatabaseConnection(payload) {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('Database connection payload must be an object.');
+  }
+
+  const name = payload.name;
+  const connector = payload.connector;
+
+  if (typeof name !== 'string' || name.length === 0) {
+    throw new Error('Database connection name must be a non-empty string.');
+  }
+
+  ValidateIdentifier(name, 'Database connection name');
+
+  if (!connector || typeof connector !== 'object') {
+    throw new Error('Database connector must be an object.');
+  }
+
+  const connector_type = connector.type;
+  if (typeof connector_type !== 'string') {
+    throw new Error('Database connector.type must be a string.');
+  }
+
+  ValidateDatabaseConnectorType(connector_type);
+
+  const semantics = connector.semantics;
+  if (!semantics || typeof semantics !== 'object' || Array.isArray(semantics)) {
+    throw new Error('Database connector.semantics must be an object.');
+  }
+
+  worker_database_connection_definition_registry.set(name, {
+    name,
+    connector_type,
+    semantics
+  });
+
+  await CloseDatabaseConnectionEntry({
+    name,
+    swallow_error: true
+  });
+  await ConnectDatabaseConnection({ name });
+}
+
+async function RemoveDatabaseConnection(params) {
+  const { name } = params;
+
+  if (worker_database_connection_connect_promise_by_name.has(name)) {
+    try {
+      await worker_database_connection_connect_promise_by_name.get(name);
+    } catch {
+      // Ignore failed in-flight connect attempts during removal.
+    }
+  }
+
+  worker_database_connection_definition_registry.delete(name);
+  await CloseDatabaseConnectionEntry({
+    name,
+    swallow_error: true
+  });
+}
+
+async function CloseAllDatabaseConnections() {
+  const connection_names = Array.from(worker_database_connection_registry.keys());
+  for (const connection_name of connection_names) {
+    await CloseDatabaseConnectionEntry({
+      name: connection_name,
+      swallow_error: true
+    });
+  }
+}
+
 globalThis.wpc_import = async function(alias) {
   if (typeof alias !== 'string' || alias.length === 0) {
     throw new Error('wpc_import(alias) requires a non-empty string alias.');
@@ -643,6 +1402,18 @@ globalThis.wpc_constant = function(name) {
   }
 
   return worker_constant_registry.get(name);
+};
+
+globalThis.wpc_database_connection = async function(name) {
+  if (typeof name !== 'string' || name.length === 0) {
+    throw new Error('wpc_database_connection(name) requires a non-empty string name.');
+  }
+
+  if (!worker_database_connection_definition_registry.has(name)) {
+    throw new Error('Database connection "' + name + '" is not defined on this worker.');
+  }
+
+  return await ConnectDatabaseConnection({ name });
 };
 
 async function HandleControlRequest(message) {
@@ -688,6 +1459,20 @@ async function HandleControlRequest(message) {
       }
 
       worker_constant_registry.delete(constant_name);
+    } else if (message.command === 'define_database_connection') {
+      await InstallDatabaseConnection(message.payload);
+    } else if (message.command === 'undefine_database_connection') {
+      const database_connection_name = message.payload && message.payload.name;
+      if (
+        typeof database_connection_name !== 'string' ||
+        database_connection_name.length === 0
+      ) {
+        throw new Error('Database connection name is required for undefine.');
+      }
+
+      await RemoveDatabaseConnection({
+        name: database_connection_name
+      });
     } else if (message.command === 'shutdown') {
       SafePostMessage({
         message_type: 'control_response',
@@ -702,7 +1487,9 @@ async function HandleControlRequest(message) {
       });
 
       setImmediate(function() {
-        process.exit(0);
+        void CloseAllDatabaseConnections().finally(function() {
+          process.exit(0);
+        });
       });
 
       return;
@@ -806,7 +1593,8 @@ async function HandleCallRequest(message) {
 
     const function_context = {
       dependencies: Object.fromEntries(worker_dependency_registry.entries()),
-      constants: Object.fromEntries(worker_constant_registry.entries())
+      constants: Object.fromEntries(worker_constant_registry.entries()),
+      database_connections: BuildDatabaseConnectionContext()
     };
 
     const return_value = await worker_function(...call_args, function_context);
@@ -920,6 +1708,10 @@ export class WorkerProcedureCall {
     worker_dependency_definition_t
   >();
   private constant_definition_by_name = new Map<string, worker_constant_definition_t>();
+  private database_connection_definition_by_name = new Map<
+    string,
+    worker_database_connection_definition_t
+  >();
 
   private pending_call_by_request_id = new Map<string, pending_call_record_t>();
   private pending_control_by_request_id = new Map<
@@ -1021,6 +1813,10 @@ export class WorkerProcedureCall {
     const required_constant_names = ParseStringLiteralConstants({
       function_source
     });
+    const required_database_connection_names =
+      ParseStringLiteralDatabaseConnections({
+        function_source
+      });
 
     const existing_definition = this.function_definition_by_name.get(name);
     if (
@@ -1041,6 +1837,7 @@ export class WorkerProcedureCall {
         parameter_signature,
         required_dependency_aliases,
         required_constant_names,
+        required_database_connection_names,
         installed_worker_ids: new Set<number>()
       };
 
@@ -1051,6 +1848,8 @@ export class WorkerProcedureCall {
     updated_definition.parameter_signature = parameter_signature;
     updated_definition.required_dependency_aliases = required_dependency_aliases;
     updated_definition.required_constant_names = required_constant_names;
+    updated_definition.required_database_connection_names =
+      required_database_connection_names;
     updated_definition.installed_worker_ids.clear();
 
     this.function_definition_by_name.set(name, updated_definition);
@@ -1330,6 +2129,135 @@ export class WorkerProcedureCall {
       });
   }
 
+  async defineDatabaseConnection(
+    params: define_database_connection_params_t
+  ): Promise<void> {
+    const { name, connector } = params;
+
+    if (typeof name !== 'string' || name.length === 0) {
+      throw new Error('Database connection name must be a non-empty string.');
+    }
+
+    ValidateIdentifier({ value: name, label: 'Database connection name' });
+
+    if (!connector || !IsRecordObject(connector)) {
+      throw new Error('Database connector must be an object.');
+    }
+
+    if (this.database_connection_definition_by_name.has(name)) {
+      throw new Error(`Database connection "${name}" is already defined.`);
+    }
+
+    if (typeof connector.type !== 'string' || connector.type.length === 0) {
+      throw new Error('Database connector.type must be a non-empty string.');
+    }
+
+    const connector_type = NormalizeDatabaseConnectorType({
+      value: connector.type,
+      label: 'Database connector.type'
+    });
+
+    if (!IsRecordObject(connector.semantics)) {
+      throw new Error('Database connector.semantics must be an object.');
+    }
+
+    let semantics: Record<string, unknown>;
+    try {
+      semantics = structuredClone(connector.semantics);
+    } catch (error) {
+      throw new Error(
+        `Database connection "${name}" semantics must be serializable: ${GetErrorMessage({ error })}`
+      );
+    }
+
+    const database_connection_definition: worker_database_connection_definition_t = {
+      name,
+      connector_type,
+      semantics,
+      installed_worker_ids: new Set<number>()
+    };
+
+    this.database_connection_definition_by_name.set(name, database_connection_definition);
+
+    try {
+      await this.installDatabaseConnectionAcrossRunningWorkers({
+        name,
+        database_connection_definition
+      });
+    } catch (error) {
+      this.database_connection_definition_by_name.delete(name);
+      throw error;
+    }
+  }
+
+  async undefineDatabaseConnection(
+    params: undefine_database_connection_params_t
+  ): Promise<void> {
+    const { name } = params;
+
+    if (typeof name !== 'string' || name.length === 0) {
+      throw new Error('Database connection name must be a non-empty string.');
+    }
+
+    const existing_definition = this.database_connection_definition_by_name.get(name);
+    if (!existing_definition) {
+      return;
+    }
+
+    this.database_connection_definition_by_name.delete(name);
+
+    if (this.lifecycle_state !== 'running') {
+      return;
+    }
+
+    const worker_states = this.getReadyWorkerStates();
+    const removal_results = await Promise.allSettled(
+      worker_states.map(async (worker_state): Promise<void> => {
+        try {
+          await this.removeDatabaseConnectionOnWorker({
+            worker_id: worker_state.worker_id,
+            name
+          });
+        } catch (error) {
+          throw new Error(
+            `Worker ${worker_state.worker_id}: ${GetErrorMessage({ error })}`
+          );
+        }
+      })
+    );
+
+    const errors = removal_results
+      .filter((result): result is PromiseRejectedResult => {
+        return result.status === 'rejected';
+      })
+      .map((result): string => {
+        return GetErrorMessage({ error: result.reason });
+      });
+
+    if (errors.length > 0) {
+      throw new Error(
+        `Failed to remove database connection "${name}" on one or more workers: ${errors.join('; ')}`
+      );
+    }
+  }
+
+  async getWorkerDatabaseConnections(): Promise<
+    remote_database_connection_information_t[]
+  > {
+    return Array.from(this.database_connection_definition_by_name.values())
+      .sort((left_definition, right_definition): number => {
+        return left_definition.name.localeCompare(right_definition.name);
+      })
+      .map((database_connection_definition): remote_database_connection_information_t => {
+        return {
+          name: database_connection_definition.name,
+          connector_type: database_connection_definition.connector_type,
+          installed_worker_count:
+            database_connection_definition.installed_worker_ids.size
+        };
+      });
+  }
+
   async startWorkers(params: start_workers_params_t): Promise<void> {
     const { count } = params;
 
@@ -1499,6 +2427,10 @@ export class WorkerProcedureCall {
 
     for (const constant_definition of this.constant_definition_by_name.values()) {
       constant_definition.installed_worker_ids.clear();
+    }
+
+    for (const database_connection_definition of this.database_connection_definition_by_name.values()) {
+      database_connection_definition.installed_worker_ids.clear();
     }
 
     this.worker_state_by_id.clear();
@@ -1865,6 +2797,7 @@ export class WorkerProcedureCall {
 
     await this.installAllDependenciesOnWorker({ worker_id });
     await this.installAllConstantsOnWorker({ worker_id });
+    await this.installAllDatabaseConnectionsOnWorker({ worker_id });
     await this.installAllFunctionsOnWorker({ worker_id });
 
     return worker_id;
@@ -1915,6 +2848,25 @@ export class WorkerProcedureCall {
 
     for (const constant_definition of constant_definitions) {
       await this.installConstantOnWorker({ worker_id, constant_definition });
+    }
+  }
+
+  private async installAllDatabaseConnectionsOnWorker(params: {
+    worker_id: number;
+  }): Promise<void> {
+    const { worker_id } = params;
+
+    const database_connection_definitions = Array.from(
+      this.database_connection_definition_by_name.values()
+    ).sort((left_definition, right_definition): number => {
+      return left_definition.name.localeCompare(right_definition.name);
+    });
+
+    for (const database_connection_definition of database_connection_definitions) {
+      await this.installDatabaseConnectionOnWorker({
+        worker_id,
+        database_connection_definition
+      });
     }
   }
 
@@ -1996,6 +2948,47 @@ export class WorkerProcedureCall {
     if (errors.length > 0) {
       throw new Error(
         `Failed to install constant "${name}" on one or more workers: ${errors.join('; ')}`
+      );
+    }
+  }
+
+  private async installDatabaseConnectionAcrossRunningWorkers(params: {
+    name: string;
+    database_connection_definition: worker_database_connection_definition_t;
+  }): Promise<void> {
+    const { name, database_connection_definition } = params;
+
+    if (this.lifecycle_state !== 'running') {
+      return;
+    }
+
+    const worker_states = this.getReadyWorkerStates();
+    const install_results = await Promise.allSettled(
+      worker_states.map(async (worker_state): Promise<void> => {
+        try {
+          await this.installDatabaseConnectionOnWorker({
+            worker_id: worker_state.worker_id,
+            database_connection_definition
+          });
+        } catch (error) {
+          throw new Error(
+            `Worker ${worker_state.worker_id}: ${GetErrorMessage({ error })}`
+          );
+        }
+      })
+    );
+
+    const errors = install_results
+      .filter((result): result is PromiseRejectedResult => {
+        return result.status === 'rejected';
+      })
+      .map((result): string => {
+        return GetErrorMessage({ error: result.reason });
+      });
+
+    if (errors.length > 0) {
+      throw new Error(
+        `Failed to install database connection "${name}" on one or more workers: ${errors.join('; ')}`
       );
     }
   }
@@ -2095,6 +3088,42 @@ export class WorkerProcedureCall {
     await this.sendControlCommand({
       worker_id,
       command: 'undefine_constant',
+      payload: {
+        name
+      }
+    });
+  }
+
+  private async installDatabaseConnectionOnWorker(params: {
+    worker_id: number;
+    database_connection_definition: worker_database_connection_definition_t;
+  }): Promise<void> {
+    const { worker_id, database_connection_definition } = params;
+
+    await this.sendControlCommand({
+      worker_id,
+      command: 'define_database_connection',
+      payload: {
+        name: database_connection_definition.name,
+        connector: {
+          type: database_connection_definition.connector_type,
+          semantics: database_connection_definition.semantics
+        }
+      }
+    });
+
+    database_connection_definition.installed_worker_ids.add(worker_id);
+  }
+
+  private async removeDatabaseConnectionOnWorker(params: {
+    worker_id: number;
+    name: string;
+  }): Promise<void> {
+    const { worker_id, name } = params;
+
+    await this.sendControlCommand({
+      worker_id,
+      command: 'undefine_database_connection',
       payload: {
         name
       }
@@ -2286,6 +3315,14 @@ export class WorkerProcedureCall {
       }
     }
 
+    for (const required_name of function_definition.required_database_connection_names) {
+      if (!this.database_connection_definition_by_name.has(required_name)) {
+        throw new Error(
+          `Function "${function_name}" requires database connection "${required_name}" which is not defined.`
+        );
+      }
+    }
+
     const eligible_worker_states = this.getReadyWorkerStates().filter(
       (worker_state): boolean => {
         if (!function_definition.installed_worker_ids.has(worker_state.worker_id)) {
@@ -2309,6 +3346,19 @@ export class WorkerProcedureCall {
           if (
             !constant_definition ||
             !constant_definition.installed_worker_ids.has(worker_state.worker_id)
+          ) {
+            return false;
+          }
+        }
+
+        for (const required_name of function_definition.required_database_connection_names) {
+          const database_connection_definition =
+            this.database_connection_definition_by_name.get(required_name);
+          if (
+            !database_connection_definition ||
+            !database_connection_definition.installed_worker_ids.has(
+              worker_state.worker_id
+            )
           ) {
             return false;
           }
@@ -2657,6 +3707,10 @@ export class WorkerProcedureCall {
 
     for (const constant_definition of this.constant_definition_by_name.values()) {
       constant_definition.installed_worker_ids.delete(worker_id);
+    }
+
+    for (const database_connection_definition of this.database_connection_definition_by_name.values()) {
+      database_connection_definition.installed_worker_ids.delete(worker_id);
     }
 
     const last_worker_error = this.last_error_by_worker_id.get(worker_id);

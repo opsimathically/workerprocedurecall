@@ -31,6 +31,17 @@ import { WorkerProcedureCall } from './src/index';
       module_specifier: 'node:path'
     });
 
+    await workerprocedurecall.defineDatabaseConnection({
+      name: 'db_connection_1',
+      connector: {
+        type: 'sqlite',
+        semantics: {
+          filename: ':memory:',
+          driver: 'better-sqlite3'
+        }
+      }
+    });
+
     // Use both import-like dependency loading and constants in the worker function.
     await workerprocedurecall.defineWorkerFunction({
       name: 'WPCFunction1',
@@ -70,6 +81,32 @@ import { WorkerProcedureCall } from './src/index';
       }
     });
 
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'WPCFunctionDb',
+      worker_func: async function (params: {
+        record_name: string;
+      }): Promise<number> {
+        const sqlite_database =
+          await wpc_database_connection('db_connection_1');
+
+        sqlite_database.exec(
+          'CREATE TABLE IF NOT EXISTS records (record_name TEXT NOT NULL)'
+        );
+        sqlite_database
+          .prepare('INSERT INTO records (record_name) VALUES (?)')
+          .run(params.record_name);
+
+        const count_row = sqlite_database
+          .prepare('SELECT COUNT(*) as total_record_count FROM records')
+          .get() as {
+          total_record_count: number;
+        };
+
+        console.log({ TOTAL_RECORD_COUNT: count_row.total_record_count });
+        return count_row.total_record_count;
+      }
+    });
+
     // Intentionally throws to trigger a worker_event (call_execution_failed).
     await workerprocedurecall.defineWorkerFunction({
       name: 'WPCFunctionTriggerEvent',
@@ -84,19 +121,29 @@ import { WorkerProcedureCall } from './src/index';
       await workerprocedurecall.getWorkerDependencies();
     const remote_constant_information =
       await workerprocedurecall.getWorkerConstants();
+    const remote_database_connection_information =
+      await workerprocedurecall.getWorkerDatabaseConnections();
 
     console.log('Remote functions:', remote_function_information);
     console.log('Remote dependencies:', remote_dependency_information);
     console.log('Remote constants:', remote_constant_information);
+    console.log(
+      'Remote database connections:',
+      remote_database_connection_information
+    );
 
     const return_val_1 = await workerprocedurecall.call.WPCFunction1({
       file_path: '/tmp/example-file.txt'
     });
 
     const return_val_2 = await workerprocedurecall.call.WPCFunction2();
+    const return_val_db = await workerprocedurecall.call.WPCFunctionDb({
+      record_name: 'example'
+    });
 
     console.log('WPCFunction1 return:', return_val_1);
     console.log('WPCFunction2 return:', return_val_2);
+    console.log('WPCFunctionDb return:', return_val_db);
 
     try {
       await workerprocedurecall.call.WPCFunctionTriggerEvent();
@@ -104,10 +151,16 @@ import { WorkerProcedureCall } from './src/index';
       console.log('WPCFunctionTriggerEvent call error (expected):', error);
     }
 
-    console.log('Worker health states:', workerprocedurecall.getWorkerHealthStates());
+    console.log(
+      'Worker health states:',
+      workerprocedurecall.getWorkerHealthStates()
+    );
 
     await workerprocedurecall.undefineWokerFunction({
       name: 'WPCFunctionTriggerEvent'
+    });
+    await workerprocedurecall.undefineDatabaseConnection({
+      name: 'db_connection_1'
     });
     await workerprocedurecall.undefineWorkerDependency({ alias: 'crypto_dep' });
     await workerprocedurecall.undefineWokerFunction({ name: 'WPCFunction2' });
