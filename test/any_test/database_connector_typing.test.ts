@@ -1,6 +1,6 @@
 import test from 'node:test';
-import type { Database as better_sqlite3_database_t } from 'better-sqlite3';
-import type { Database as sqlite3_database_t } from 'sqlite3';
+import type * as BetterSqlite3 from 'better-sqlite3';
+import type * as SQLite3 from 'sqlite3';
 
 import {
   WorkerProcedureCall,
@@ -14,7 +14,7 @@ declare global {
   }
 
   interface wpc_database_connection_handle_by_name_i {
-    sqlite_better_connection_1: better_sqlite3_database_t;
+    sqlite_better_connection_1: BetterSqlite3.Database;
   }
 }
 
@@ -82,10 +82,22 @@ async function AssertTypedSqliteConnectionWithoutCast(): Promise<void> {
 
 async function AssertSqliteConnectionUsesPackageTypes(): Promise<void> {
   const sqlite_database = await wpc_database_connection('sqlite_connection_1');
-  const sqlite_database_package_type: better_sqlite3_database_t | sqlite3_database_t =
+  const sqlite_database_package_type: BetterSqlite3.Database | SQLite3.Database =
     sqlite_database;
 
   void sqlite_database_package_type;
+}
+
+async function AssertGenericLookupWorksWithoutGlobalMapping(): Promise<void> {
+  const sqlite_database = await wpc_database_connection<BetterSqlite3.Database>({
+    name: 'sqlite_connection_generic_1',
+    type: 'sqlite'
+  });
+
+  const statement = sqlite_database.prepare<unknown[], { value: number }>(
+    'SELECT 1 as value'
+  );
+  statement.get();
 }
 
 async function AssertInvalidSqliteMethodFailsTypeCheck(): Promise<void> {
@@ -124,6 +136,7 @@ test('database connector typing assertions compile', function () {
   void invalid_mongodb_connection_params;
   void AssertTypedSqliteConnectionWithoutCast;
   void AssertSqliteConnectionUsesPackageTypes;
+  void AssertGenericLookupWorksWithoutGlobalMapping;
   void AssertInvalidSqliteMethodFailsTypeCheck;
   void AssertUnknownConnectionNameFallsBackToUnknown;
   void AssertNameSpecificHandleOverrideWorks;

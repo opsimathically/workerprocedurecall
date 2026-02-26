@@ -1,4 +1,5 @@
 import { WorkerProcedureCall } from './src/index';
+import type * as BetterSqlite3 from 'better-sqlite3';
 
 (async function () {
   const workerprocedurecall = new WorkerProcedureCall({
@@ -87,7 +88,10 @@ import { WorkerProcedureCall } from './src/index';
         record_name: string;
       }): Promise<number> {
         const sqlite_database =
-          await wpc_database_connection('db_connection_1');
+          await wpc_database_connection<BetterSqlite3.Database>({
+            name: 'db_connection_1',
+            type: 'sqlite'
+          });
 
         sqlite_database.exec(
           'CREATE TABLE IF NOT EXISTS records (record_name TEXT NOT NULL)'

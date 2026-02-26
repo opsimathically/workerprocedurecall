@@ -266,6 +266,18 @@ export type wpc_database_connection_handle_by_name_t<
     ? wpc_database_connection_handle_from_name_type_t<connection_name_t>
     : unknown;
 
+export type wpc_database_connection_lookup_by_type_params_t<
+  connector_type_t extends database_connector_type_t = database_connector_type_t
+> = {
+  name: string;
+  type: connector_type_t;
+};
+
+export type wpc_database_connection_lookup_params_t = {
+  name: string;
+  type?: database_connector_type_t;
+};
+
 export type worker_health_state_t =
   | 'starting'
   | 'ready'
@@ -434,6 +446,14 @@ declare global {
   function wpc_database_connection<connection_name_t extends string>(
     name: connection_name_t
   ): Promise<wpc_database_connection_handle_by_name_t<connection_name_t>>;
+  function wpc_database_connection<
+    connector_type_t extends database_connector_type_t
+  >(
+    params: wpc_database_connection_lookup_by_type_params_t<connector_type_t>
+  ): Promise<wpc_database_connection_handle_from_type_t<connector_type_t>>;
+  function wpc_database_connection<connection_handle_t = unknown>(
+    params: wpc_database_connection_lookup_params_t
+  ): Promise<connection_handle_t>;
 }
 
 function ValidatePositiveInteger(params: { value: number; label: string }): void {
@@ -644,11 +664,14 @@ function ParseStringLiteralDatabaseConnections(params: {
   const database_connection_names = new Set<string>();
   const database_connection_call_pattern =
     /wpc_database_connection\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\)/g;
+  const database_connection_object_name_pattern =
+    /wpc_database_connection\(\s*\{[^}]*\bname\s*:\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"][^}]*\}\s*\)/g;
   const context_database_connection_pattern =
     /context\.database_connections\.([A-Za-z_][A-Za-z0-9_]*)/g;
 
   for (const pattern of [
     database_connection_call_pattern,
+    database_connection_object_name_pattern,
     context_database_connection_pattern
   ]) {
     let match_result = pattern.exec(function_source);
@@ -873,6 +896,48 @@ function ValidateDatabaseConnectorType(connector_type) {
       'Database connector type must be one of: mongodb, postgresql, mariadb, mysql, sqlite.'
     );
   }
+}
+
+function ParseDatabaseConnectionLookupInput(value) {
+  if (typeof value === 'string') {
+    if (value.length === 0) {
+      throw new Error(
+        'wpc_database_connection(name_or_params) requires a non-empty string name.'
+      );
+    }
+
+    return {
+      name: value,
+      connector_type_hint: null
+    };
+  }
+
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(
+      'wpc_database_connection(name_or_params) requires either a string name or an object with { name, type? }.'
+    );
+  }
+
+  const name = value.name;
+  if (typeof name !== 'string' || name.length === 0) {
+    throw new Error(
+      'wpc_database_connection(name_or_params) object input requires a non-empty string name.'
+    );
+  }
+
+  const connector_type_hint =
+    typeof value.type === 'string' && value.type.length > 0
+      ? value.type
+      : null;
+
+  if (connector_type_hint) {
+    ValidateDatabaseConnectorType(connector_type_hint);
+  }
+
+  return {
+    name,
+    connector_type_hint
+  };
 }
 
 function ToRecordOrEmpty(value) {
@@ -1404,13 +1469,28 @@ globalThis.wpc_constant = function(name) {
   return worker_constant_registry.get(name);
 };
 
-globalThis.wpc_database_connection = async function(name) {
-  if (typeof name !== 'string' || name.length === 0) {
-    throw new Error('wpc_database_connection(name) requires a non-empty string name.');
+globalThis.wpc_database_connection = async function(name_or_params) {
+  const lookup_input = ParseDatabaseConnectionLookupInput(name_or_params);
+  const name = lookup_input.name;
+
+  const definition = worker_database_connection_definition_registry.get(name);
+  if (!definition) {
+    throw new Error('Database connection "' + name + '" is not defined on this worker.');
   }
 
-  if (!worker_database_connection_definition_registry.has(name)) {
-    throw new Error('Database connection "' + name + '" is not defined on this worker.');
+  if (
+    lookup_input.connector_type_hint &&
+    definition.connector_type !== lookup_input.connector_type_hint
+  ) {
+    throw new Error(
+      'Database connection "' +
+        name +
+        '" is defined as type "' +
+        definition.connector_type +
+        '" but lookup requested type "' +
+        lookup_input.connector_type_hint +
+        '".'
+    );
   }
 
   return await ConnectDatabaseConnection({ name });

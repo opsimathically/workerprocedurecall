@@ -12,6 +12,7 @@ npm install @opsimathically/workerprocedurecall
 
 ```typescript
 import { WorkerProcedureCall } from '@opsimathically/workerprocedurecall';
+import type * as BetterSqlite3 from 'better-sqlite3';
 
 (async function () {
   const workerprocedurecall = new WorkerProcedureCall({
@@ -88,7 +89,12 @@ import { WorkerProcedureCall } from '@opsimathically/workerprocedurecall';
   await workerprocedurecall.defineWorkerFunction({
     name: 'WPCFunctionDb',
     worker_func: async function (record_name: string): Promise<number> {
-      const sqlite_database = await wpc_database_connection('sqlite_main');
+      const sqlite_database = await wpc_database_connection<
+        BetterSqlite3.Database
+      >({
+        name: 'sqlite_main',
+        type: 'sqlite'
+      });
 
       sqlite_database.exec(
         'CREATE TABLE IF NOT EXISTS records (record_name TEXT NOT NULL)'
@@ -183,18 +189,16 @@ import { WorkerProcedureCall } from '@opsimathically/workerprocedurecall';
 - Connections are created when each worker installs the definition.
 - If any worker fails to connect, the define/start operation fails with worker + connector details.
 - In worker functions, call `await wpc_database_connection('name')`.
-- For typed handles without casts, add a project-level `.d.ts` map for known connection names (for example `wpc_database_connection_handles.d.ts`):
+- For explicit typed handles with no global type declarations, use the generic/object form:
   ```typescript
-  import type { Database as better_sqlite3_database_t } from 'better-sqlite3';
+  import type * as BetterSqlite3 from 'better-sqlite3';
 
-  declare global {
-    interface wpc_database_connection_handle_by_name_i {
-      sqlite_main: better_sqlite3_database_t;
-    }
-  }
-
-  export {};
+  const sqlite_database = await wpc_database_connection<BetterSqlite3.Database>({
+    name: 'sqlite_main',
+    type: 'sqlite'
+  });
   ```
+- Optional alternative: use global declaration merging via `wpc_database_connection_handle_by_name_i` if you prefer name-based inference.
 - For custom type overrides, augment either:
   - `wpc_database_connection_handle_by_name_i` (name-specific handle type)
   - `wpc_database_connector_handle_overrides_i` (connector-type handle override)
@@ -330,6 +334,7 @@ await workerprocedurecall.defineDatabaseConnection({
   - `wpc_import('alias')`
   - `wpc_constant('NAME')`
   - `wpc_database_connection('NAME')`
+  - `wpc_database_connection({ name: 'NAME', ... })`
   - `context.dependencies.alias`
   - `context.constants.NAME`
   - `context.database_connections.NAME`
@@ -338,7 +343,9 @@ await workerprocedurecall.defineDatabaseConnection({
 ## Migration Note
 
 - `defineDatabaseConnection`, `undefineDatabaseConnection`, and `getWorkerDatabaseConnections` are new public APIs.
-- Worker functions can now access connection handles through `await wpc_database_connection('NAME')`.
+- Worker functions can now access connection handles through:
+  - `await wpc_database_connection('NAME')`
+  - `await wpc_database_connection<connection_handle_t>({ name: 'NAME', type: '...' })`
 
 ## Hash Drift Check Pattern
 
