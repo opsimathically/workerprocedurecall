@@ -1,6 +1,12 @@
 import { WorkerProcedureCall } from './src/index';
 import type * as BetterSqlite3 from 'better-sqlite3';
 
+type shared_profile_t = {
+  account_id: string;
+  request_count: number;
+  tags: string[];
+};
+
 (async function () {
   const workerprocedurecall = new WorkerProcedureCall({
     call_timeout_ms: 30_000,
@@ -49,9 +55,9 @@ import type * as BetterSqlite3 from 'better-sqlite3';
       worker_func: async function (params: {
         file_path: string;
       }): Promise<string> {
-        const path_module = (await wpc_import('path_dep')) as {
-          basename: (value: string) => string;
-        };
+        const path_module = await wpc_import<typeof import('node:path')>({
+          alias: 'path_dep'
+        });
 
         const service_prefix = wpc_constant('SERVICE_PREFIX') as string;
 
@@ -74,11 +80,69 @@ import type * as BetterSqlite3 from 'better-sqlite3';
     await workerprocedurecall.defineWorkerFunction({
       name: 'WPCFunction2',
       worker_func: async function (): Promise<string> {
-        const crypto_module = (await wpc_import('crypto_dep')) as {
-          randomUUID: () => string;
-        };
+        const crypto_module = await wpc_import<typeof import('node:crypto')>({
+          alias: 'crypto_dep'
+        });
 
         return crypto_module.randomUUID();
+      }
+    });
+
+    // Shared memory chunk creation (fails if id is not unique).
+    await workerprocedurecall.sharedCreate<shared_profile_t>({
+      id: 'shared_profile_1',
+      note: 'Shared profile object used across parent and workers.',
+      type: 'json',
+      content: {
+        account_id: 'acct_001',
+        request_count: 0,
+        tags: ['example', 'shared-memory']
+      }
+    });
+
+    // Parent-side lock, access, write, and release.
+    const shared_profile = await workerprocedurecall.sharedAccess<shared_profile_t>({
+      id: 'shared_profile_1'
+    });
+
+    await workerprocedurecall.sharedWrite<shared_profile_t>({
+      id: 'shared_profile_1',
+      content: {
+        ...shared_profile,
+        request_count: shared_profile.request_count + 1
+      }
+    });
+
+    await workerprocedurecall.sharedRelease({
+      id: 'shared_profile_1'
+    });
+
+    // Worker-side shared memory access through wpc_shared_* APIs.
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'WPCFunctionSharedIncrement',
+      worker_func: async function (params: {
+        shared_chunk_id: string;
+      }): Promise<number> {
+        const shared_profile = await wpc_shared_access<shared_profile_t>({
+          id: params.shared_chunk_id,
+          timeout_ms: 5_000
+        });
+
+        const next_request_count = shared_profile.request_count + 1;
+
+        await wpc_shared_write<shared_profile_t>({
+          id: params.shared_chunk_id,
+          content: {
+            ...shared_profile,
+            request_count: next_request_count
+          }
+        });
+
+        await wpc_shared_release({
+          id: params.shared_chunk_id
+        });
+
+        return next_request_count;
       }
     });
 
@@ -144,10 +208,21 @@ import type * as BetterSqlite3 from 'better-sqlite3';
     const return_val_db = await workerprocedurecall.call.WPCFunctionDb({
       record_name: 'example'
     });
+    const shared_next_count =
+      await workerprocedurecall.call.WPCFunctionSharedIncrement({
+        shared_chunk_id: 'shared_profile_1'
+      });
 
     console.log('WPCFunction1 return:', return_val_1);
     console.log('WPCFunction2 return:', return_val_2);
     console.log('WPCFunctionDb return:', return_val_db);
+    console.log('WPCFunctionSharedIncrement return:', shared_next_count);
+
+    const shared_lock_debug_information =
+      await workerprocedurecall.sharedGetLockDebugInfo({
+        include_history: true
+      });
+    console.log('Shared lock debug info:', shared_lock_debug_information);
 
     try {
       await workerprocedurecall.call.WPCFunctionTriggerEvent();
@@ -166,7 +241,13 @@ import type * as BetterSqlite3 from 'better-sqlite3';
     await workerprocedurecall.undefineDatabaseConnection({
       name: 'db_connection_1'
     });
+    await workerprocedurecall.sharedFree({
+      id: 'shared_profile_1'
+    });
     await workerprocedurecall.undefineWorkerDependency({ alias: 'crypto_dep' });
+    await workerprocedurecall.undefineWokerFunction({
+      name: 'WPCFunctionSharedIncrement'
+    });
     await workerprocedurecall.undefineWokerFunction({ name: 'WPCFunction2' });
   } finally {
     workerprocedurecall.offWorkerEvent({

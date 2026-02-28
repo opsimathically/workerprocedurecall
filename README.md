@@ -58,9 +58,9 @@ import type * as BetterSqlite3 from 'better-sqlite3';
   await workerprocedurecall.defineWorkerFunction({
     name: 'WPCFunction1',
     worker_func: async function (file_path: string): Promise<string> {
-      const path_module = (await wpc_import('path_dep')) as {
-        basename: (value: string) => string;
-      };
+      const path_module = await wpc_import<typeof import('node:path')>({
+        alias: 'path_dep'
+      });
 
       const prefix = wpc_constant('SERVICE_PREFIX') as string;
       return `${prefix}:${path_module.basename(file_path)}`;
@@ -78,9 +78,9 @@ import type * as BetterSqlite3 from 'better-sqlite3';
   await workerprocedurecall.defineWorkerFunction({
     name: 'WPCFunction2',
     worker_func: async function (): Promise<string> {
-      const crypto_module = (await wpc_import('crypto_dep')) as {
-        randomUUID: () => string;
-      };
+      const crypto_module = await wpc_import<typeof import('node:crypto')>({
+        alias: 'crypto_dep'
+      });
 
       return crypto_module.randomUUID();
     }
@@ -147,6 +147,9 @@ import type * as BetterSqlite3 from 'better-sqlite3';
 
 - Use `defineWorkerDependency` to register an alias to a module specifier.
 - In worker functions, call `await wpc_import('alias')`.
+- For explicit typed handles without casts, use:
+  - `await wpc_import<typeof import('node:path')>({ alias: 'path_dep' })`
+- Optional alternative: augment `wpc_dependency_by_alias_i` for alias-based inference so `wpc_import('path_dep')` returns the mapped type.
 - Only registered aliases are accessible (allowlist model).
 - Worker runtime resolves modules using `require(...)`, then falls back to dynamic `import(...)`.
 - Module results are cached in each worker's dependency registry.
@@ -286,6 +289,7 @@ await workerprocedurecall.defineDatabaseConnection({
 ## Behavior Notes
 
 - Parent thread is the source of truth for functions, dependencies, constants, and database connections.
+- Parent thread is also the source of truth for shared-memory chunk metadata and lock ownership.
 - Functions, dependencies, constants, and database connections can be defined before startup or while workers are running.
 - Function metadata includes `function_hash_sha1` so callers can detect function version drift.
 - New workers (including restarted workers) receive full registry synchronization on startup.
@@ -299,6 +303,39 @@ await workerprocedurecall.defineDatabaseConnection({
   - `restart_base_delay_ms`
   - `restart_max_delay_ms`
   - `restart_jitter_ms`
+
+## Shared Memory Chunks
+
+- Shared chunks are stored in a parent-managed `SharedArrayBuffer` heap.
+- Supported chunk types:
+  - `json`
+  - `text`
+  - `number`
+  - `binary`
+- Parent APIs:
+  - `sharedCreate({ id, note?, type, content })`
+  - `sharedAccess({ id, timeout_ms? })`
+  - `sharedWrite({ id, content })`
+  - `sharedRelease({ id })`
+  - `sharedFree({ id, require_unlocked? })`
+  - `sharedGetLockDebugInfo({ include_history?, min_held_ms? })`
+- Worker APIs (inside worker functions):
+  - `await wpc_shared_create(...)`
+  - `await wpc_shared_access(...)`
+  - `await wpc_shared_write(...)`
+  - `await wpc_shared_release(...)`
+  - `await wpc_shared_free(...)`
+- Locking model:
+  - `sharedAccess` acquires an exclusive per-chunk lock.
+  - `sharedWrite`/`sharedRelease` require the same owner context that acquired the lock.
+  - competing access waits until release or timeout.
+- Free/delete safety:
+  - `sharedFree` rejects when chunk is locked by default.
+  - with `require_unlocked: false`, free is allowed only when safe for the current owner context.
+- Debugging:
+  - `sharedGetLockDebugInfo` reports lock holder, hold time, waiters, contention counters, timeout counters, and optional recent lock events.
+- Crash/timeout cleanup:
+  - worker-owned locks are automatically reclaimed when calls finish, timeout, or worker processes exit.
 
 ## Public Methods
 
@@ -319,6 +356,13 @@ await workerprocedurecall.defineDatabaseConnection({
 - `undefineDatabaseConnection({ name })`
 - `getWorkerDatabaseConnections()`
 
+- `sharedCreate({ id, note?, type, content })`
+- `sharedAccess({ id, timeout_ms? })`
+- `sharedWrite({ id, content })`
+- `sharedRelease({ id })`
+- `sharedFree({ id, require_unlocked? })`
+- `sharedGetLockDebugInfo({ include_history?, min_held_ms? })`
+
 - `startWorkers({ count, ...options })`
 - `stopWorkers()`
 - `onWorkerEvent({ listener })`
@@ -332,6 +376,7 @@ await workerprocedurecall.defineDatabaseConnection({
 - Worker functions must be self-contained and must not rely on parent closure state.
 - Dependency detection for scheduling currently uses static string-literal patterns:
   - `wpc_import('alias')`
+  - `wpc_import({ alias: 'alias', ... })`
   - `wpc_constant('NAME')`
   - `wpc_database_connection('NAME')`
   - `wpc_database_connection({ name: 'NAME', ... })`
@@ -369,3 +414,17 @@ npm run build
 ```bash
 npm test
 ```
+
+## Running Benchmarks
+
+```bash
+npm run benchmark:worker-vs-single
+npm run benchmark:worker-vs-single-sha1
+npm run benchmark:worker-vs-single-sha1-heavy
+npm run benchmark:shared-vs-ipc
+npm run benchmark:shared-vs-ipc-heavy
+```
+
+Benchmark mode note:
+- Worker benchmark paths run with bounded parallel RPC calls (`worker_execution_mode=parallel`).
+- Local benchmark paths remain single-thread sequential baselines.

@@ -9,6 +9,10 @@ import {
 } from '../../src/index';
 
 declare global {
+  interface wpc_dependency_by_alias_i {
+    path_dep_typed: typeof import('node:path');
+  }
+
   interface wpc_database_connection_type_by_name_i {
     sqlite_connection_1: 'sqlite';
   }
@@ -125,6 +129,85 @@ async function AssertNameSpecificHandleOverrideWorks(): Promise<void> {
   void count_row?.total_record_count;
 }
 
+async function AssertDependencyAliasInferenceWorks(): Promise<void> {
+  const path_module = await wpc_import('path_dep_typed');
+  path_module.basename('/tmp/path_dep_typed.txt');
+}
+
+async function AssertDependencyObjectAliasInferenceWorks(): Promise<void> {
+  const path_module = await wpc_import({ alias: 'path_dep_typed' });
+  path_module.basename('/tmp/path_dep_object.txt');
+}
+
+async function AssertDependencyGenericLookupWorksWithoutMapping(): Promise<void> {
+  const crypto_module = await wpc_import<typeof import('node:crypto')>({
+    alias: 'crypto_dep_typed'
+  });
+  crypto_module.randomUUID();
+}
+
+async function AssertDependencyInvalidMethodFailsTypeCheck(): Promise<void> {
+  const path_module = await wpc_import('path_dep_typed');
+  // @ts-expect-error path module does not include this method.
+  path_module.method_that_does_not_exist();
+}
+
+async function AssertDependencyDynamicAliasFallsBackToUnknown(params: {
+  dependency_alias: string;
+}): Promise<void> {
+  const unknown_dependency = await wpc_import(params.dependency_alias);
+  // @ts-expect-error unknown fallback should not allow method access.
+  unknown_dependency.basename('/tmp/value');
+}
+
+async function AssertSharedAccessGenericTypingWorks(): Promise<void> {
+  const shared_object = await wpc_shared_access<{
+    count: number;
+    label: string;
+  }>({
+    id: 'typed_shared_object_1'
+  });
+
+  shared_object.count.toFixed(0);
+  shared_object.label.toUpperCase();
+}
+
+async function AssertSharedUnknownFallbackIsSafe(): Promise<void> {
+  const shared_value = await wpc_shared_access({
+    id: 'typed_shared_unknown_1'
+  });
+
+  // @ts-expect-error unknown fallback should not allow property access.
+  shared_value.method_that_does_not_exist();
+}
+
+async function AssertSharedWriteGenericTypingWorks(): Promise<void> {
+  await wpc_shared_write<{ count: number }>({
+    id: 'typed_shared_write_1',
+    content: {
+      count: 1
+    }
+  });
+
+  await wpc_shared_release({
+    id: 'typed_shared_write_1'
+  });
+
+  await wpc_shared_free({
+    id: 'typed_shared_write_1'
+  });
+}
+
+async function AssertSharedWriteInvalidShapeFailsTypeCheck(): Promise<void> {
+  await wpc_shared_write<{ count: number }>({
+    id: 'typed_shared_write_invalid_1',
+    content: {
+      // @ts-expect-error shared write content shape does not match generic type.
+      wrong: 'value'
+    }
+  });
+}
+
 test('database connector typing assertions compile', function () {
   const workerprocedurecall = new WorkerProcedureCall();
 
@@ -140,4 +223,13 @@ test('database connector typing assertions compile', function () {
   void AssertInvalidSqliteMethodFailsTypeCheck;
   void AssertUnknownConnectionNameFallsBackToUnknown;
   void AssertNameSpecificHandleOverrideWorks;
+  void AssertDependencyAliasInferenceWorks;
+  void AssertDependencyObjectAliasInferenceWorks;
+  void AssertDependencyGenericLookupWorksWithoutMapping;
+  void AssertDependencyInvalidMethodFailsTypeCheck;
+  void AssertDependencyDynamicAliasFallsBackToUnknown;
+  void AssertSharedAccessGenericTypingWorks;
+  void AssertSharedUnknownFallbackIsSafe;
+  void AssertSharedWriteGenericTypingWorks;
+  void AssertSharedWriteInvalidShapeFailsTypeCheck;
 });

@@ -8,6 +8,11 @@
   "scripts": {
     "build": "npx ts-to-zod && tsup",
     "test": "node --require ts-node/register --require tsconfig-paths/register --test test/**/*.test.ts",
+    "benchmark:worker-vs-single": "node --require ts-node/register --require tsconfig-paths/register benchmarking/worker_vs_single_thread.benchmark.ts",
+    "benchmark:worker-vs-single-sha1": "node --require ts-node/register --require tsconfig-paths/register benchmarking/worker_vs_single_thread_sha1.benchmark.ts",
+    "benchmark:worker-vs-single-sha1-heavy": "node --require ts-node/register --require tsconfig-paths/register benchmarking/worker_vs_single_thread_sha1_heavy.benchmark.ts",
+    "benchmark:shared-vs-ipc": "node --require ts-node/register --require tsconfig-paths/register benchmarking/shared_memory_vs_ipc.benchmark.ts",
+    "benchmark:shared-vs-ipc-heavy": "node --require ts-node/register --require tsconfig-paths/register benchmarking/shared_memory_vs_ipc_heavy.benchmark.ts",
     "ts-to-zod": "npx ts-to-zod",
     "docs": "typedoc"
   },

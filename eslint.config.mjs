@@ -29,7 +29,10 @@ export default [
       '@typescript-eslint/consistent-type-exports': 'error',
       '@typescript-eslint/consistent-type-imports': [
         'error',
-        { prefer: 'type-imports' }
+        {
+          prefer: 'type-imports',
+          disallowTypeAnnotations: false
+        }
       ],
       '@typescript-eslint/no-this-alias': 'off',
       '@typescript-eslint/no-explicit-any': 'off',

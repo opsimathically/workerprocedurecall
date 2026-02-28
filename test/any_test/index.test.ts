@@ -477,9 +477,9 @@ test('define dependency before start supports import-like loading in worker', as
     await workerprocedurecall.defineWorkerFunction({
       name: 'WPCFunctionWithDependencyBeforeStart',
       worker_func: async function (params: { value: string }): Promise<string> {
-        const path_module = (await wpc_import('path_dep')) as {
-          basename: (value: string) => string;
-        };
+        const path_module = await wpc_import<typeof import('node:path')>({
+          alias: 'path_dep'
+        });
 
         return path_module.basename(params.value);
       }
@@ -514,9 +514,9 @@ test('define dependency after start installs into running workers', async functi
     await workerprocedurecall.defineWorkerFunction({
       name: 'WPCFunctionWithDependencyAfterStart',
       worker_func: async function (): Promise<number> {
-        const crypto_module = (await wpc_import('crypto_dep')) as {
-          randomUUID: () => string;
-        };
+        const crypto_module = await wpc_import<typeof import('node:crypto')>({
+          alias: 'crypto_dep'
+        });
 
         return crypto_module.randomUUID().length;
       }
@@ -548,9 +548,9 @@ test('undefining dependency prevents subsequent function calls', async function 
     await workerprocedurecall.defineWorkerFunction({
       name: 'WPCFunctionDependsOnRemovedDep',
       worker_func: async function (params: { val: string }): Promise<string> {
-        const path_module = (await wpc_import('path_dep_remove')) as {
-          basename: (value: string) => string;
-        };
+        const path_module = await wpc_import<typeof import('node:path')>({
+          alias: 'path_dep_remove'
+        });
 
         return path_module.basename(params.val);
       }
@@ -635,9 +635,9 @@ test('worker restart rehydrates dependencies for dependent calls', async functio
     await workerprocedurecall.defineWorkerFunction({
       name: 'WPCFunctionDependencyAfterRestart',
       worker_func: async function (params: { input: string }): Promise<string> {
-        const path_module = (await wpc_import('path_dep_restart')) as {
-          basename: (value: string) => string;
-        };
+        const path_module = await wpc_import<typeof import('node:path')>({
+          alias: 'path_dep_restart'
+        });
 
         return path_module.basename(params.input);
       }

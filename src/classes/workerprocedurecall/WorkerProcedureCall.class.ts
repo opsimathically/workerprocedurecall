@@ -5,6 +5,18 @@ import type {
   ConnectionOptions as mysql_connection_options_t,
   PoolOptions as mysql_pool_options_t
 } from 'mysql2/promise';
+import {
+  WorkerProcedureCallSharedMemoryStore,
+  type shared_chunk_access_params_t,
+  type shared_chunk_create_params_t,
+  type shared_chunk_free_params_t,
+  type shared_chunk_release_params_t,
+  type shared_chunk_type_t,
+  type shared_chunk_write_params_t,
+  type shared_lock_debug_info_params_t,
+  type shared_lock_debug_information_t,
+  type shared_lock_owner_context_t
+} from './SharedMemoryStore.class';
 
 type lifecycle_state_t = 'stopped' | 'starting' | 'running' | 'stopping';
 type control_command_t =
@@ -215,10 +227,16 @@ export type sqlite_database_connection_handle_t =
   wpc_default_database_connector_handle_by_type_t['sqlite'];
 
 declare global {
+  interface wpc_dependency_by_alias_i {}
   interface wpc_database_connector_handle_overrides_i {}
   interface wpc_database_connection_type_by_name_i {}
   interface wpc_database_connection_handle_by_name_i {}
 }
+
+type wpc_dependency_alias_key_t = Extract<
+  keyof wpc_dependency_by_alias_i,
+  string
+>;
 
 type wpc_database_connector_handle_override_key_t = Extract<
   keyof wpc_database_connector_handle_overrides_i,
@@ -266,6 +284,20 @@ export type wpc_database_connection_handle_by_name_t<
     ? wpc_database_connection_handle_from_name_type_t<connection_name_t>
     : unknown;
 
+export type wpc_dependency_from_alias_t<alias_t extends string> =
+  alias_t extends wpc_dependency_alias_key_t
+    ? wpc_dependency_by_alias_i[alias_t]
+    : unknown;
+
+export type wpc_dependency_lookup_by_alias_params_t<
+  alias_t extends string = string
+> = {
+  alias: alias_t;
+};
+
+export type wpc_dependency_lookup_params_t =
+  wpc_dependency_lookup_by_alias_params_t;
+
 export type wpc_database_connection_lookup_by_type_params_t<
   connector_type_t extends database_connector_type_t = database_connector_type_t
 > = {
@@ -277,6 +309,19 @@ export type wpc_database_connection_lookup_params_t = {
   name: string;
   type?: database_connector_type_t;
 };
+
+export type shared_memory_chunk_type_t = shared_chunk_type_t;
+export type shared_create_params_t<content_t = unknown> =
+  shared_chunk_create_params_t<content_t>;
+export type shared_access_params_t = shared_chunk_access_params_t;
+export type shared_write_params_t<content_t = unknown> =
+  shared_chunk_write_params_t<content_t>;
+export type shared_release_params_t = shared_chunk_release_params_t;
+export type shared_free_params_t = shared_chunk_free_params_t;
+export type shared_get_lock_debug_info_params_t =
+  shared_lock_debug_info_params_t;
+export type shared_lock_debug_information_result_t =
+  shared_lock_debug_information_t;
 
 export type worker_health_state_t =
   | 'starting'
@@ -399,9 +444,25 @@ type control_request_message_t = {
   payload?: Record<string, unknown>;
 };
 
+type worker_shared_command_t =
+  | 'shared_create'
+  | 'shared_access'
+  | 'shared_write'
+  | 'shared_release'
+  | 'shared_free';
+
+type shared_response_message_t = {
+  message_type: 'shared_response';
+  shared_request_id: string;
+  ok: boolean;
+  return_value?: unknown;
+  error?: remote_error_t;
+};
+
 type parent_to_worker_message_t =
   | call_request_message_t
-  | control_request_message_t;
+  | control_request_message_t
+  | shared_response_message_t;
 
 type ready_message_t = {
   message_type: 'ready';
@@ -434,14 +495,31 @@ type worker_event_message_t = {
   details?: Record<string, unknown>;
 };
 
+type shared_request_message_t = {
+  message_type: 'shared_request';
+  shared_request_id: string;
+  command: worker_shared_command_t;
+  call_request_id: string;
+  payload?: Record<string, unknown>;
+};
+
 type worker_to_parent_message_t =
   | ready_message_t
   | call_response_message_t
   | control_response_message_t
-  | worker_event_message_t;
+  | worker_event_message_t
+  | shared_request_message_t;
 
 declare global {
-  function wpc_import(alias: string): Promise<unknown>;
+  function wpc_import<alias_t extends string>(
+    alias: alias_t
+  ): Promise<wpc_dependency_from_alias_t<alias_t>>;
+  function wpc_import<alias_t extends string>(
+    params: wpc_dependency_lookup_by_alias_params_t<alias_t>
+  ): Promise<wpc_dependency_from_alias_t<alias_t>>;
+  function wpc_import<dependency_t = unknown>(
+    params: wpc_dependency_lookup_params_t
+  ): Promise<dependency_t>;
   function wpc_constant(name: string): unknown;
   function wpc_database_connection<connection_name_t extends string>(
     name: connection_name_t
@@ -454,6 +532,17 @@ declare global {
   function wpc_database_connection<connection_handle_t = unknown>(
     params: wpc_database_connection_lookup_params_t
   ): Promise<connection_handle_t>;
+  function wpc_shared_create<content_t = unknown>(
+    params: shared_create_params_t<content_t>
+  ): Promise<void>;
+  function wpc_shared_access<content_t = unknown>(
+    params: shared_access_params_t
+  ): Promise<content_t>;
+  function wpc_shared_write<content_t = unknown>(
+    params: shared_write_params_t<content_t>
+  ): Promise<void>;
+  function wpc_shared_release(params: shared_release_params_t): Promise<void>;
+  function wpc_shared_free(params: shared_free_params_t): Promise<void>;
 }
 
 function ValidatePositiveInteger(params: { value: number; label: string }): void {
@@ -522,6 +611,14 @@ function ToError(params: {
   }
 
   return error_to_return;
+}
+
+function BuildWorkerSharedOwnerId(params: {
+  worker_id: number;
+  call_request_id: string;
+}): string {
+  const { worker_id, call_request_id } = params;
+  return `worker:${worker_id}:${call_request_id}`;
 }
 
 function EnsureSerializable(params: { value: unknown; label: string }): void {
@@ -622,10 +719,16 @@ function ParseStringLiteralDependencies(params: {
 
   const dependency_aliases = new Set<string>();
   const import_call_pattern = /wpc_import\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\)/g;
+  const import_object_call_pattern =
+    /wpc_import\(\s*\{[^}]*\balias\s*:\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"][^}]*\}\s*\)/g;
   const context_dependency_pattern =
     /context\.dependencies\.([A-Za-z_][A-Za-z0-9_]*)/g;
 
-  for (const pattern of [import_call_pattern, context_dependency_pattern]) {
+  for (const pattern of [
+    import_call_pattern,
+    import_object_call_pattern,
+    context_dependency_pattern
+  ]) {
     let match_result = pattern.exec(function_source);
     while (match_result) {
       dependency_aliases.add(match_result[1]);
@@ -687,6 +790,7 @@ function ParseStringLiteralDatabaseConnections(params: {
 function BuildWorkerRuntimeScript(): string {
   return String.raw`
 const { parentPort, threadId } = require('node:worker_threads');
+const { AsyncLocalStorage } = require('node:async_hooks');
 
 if (!parentPort) {
   throw new Error('Worker runtime started without parentPort.');
@@ -698,7 +802,10 @@ const worker_constant_registry = new Map();
 const worker_database_connection_definition_registry = new Map();
 const worker_database_connection_registry = new Map();
 const worker_database_connection_connect_promise_by_name = new Map();
+const shared_request_waiter_by_id = new Map();
+const shared_call_context_storage = new AsyncLocalStorage();
 let next_worker_event_id = 1;
+let next_shared_request_id = 1;
 
 function GetErrorMessage(error) {
   if (error instanceof Error) {
@@ -882,6 +989,37 @@ function InstallConstant(payload) {
   worker_constant_registry.set(name, value);
 }
 
+function ParseDependencyLookupInput(value) {
+  if (typeof value === 'string') {
+    if (value.length === 0) {
+      throw new Error(
+        'wpc_import(alias_or_params) requires a non-empty string alias.'
+      );
+    }
+
+    return {
+      alias: value
+    };
+  }
+
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(
+      'wpc_import(alias_or_params) requires either a string alias or an object with { alias }.'
+    );
+  }
+
+  const alias = value.alias;
+  if (typeof alias !== 'string' || alias.length === 0) {
+    throw new Error(
+      'wpc_import(alias_or_params) object input requires a non-empty string alias.'
+    );
+  }
+
+  return {
+    alias
+  };
+}
+
 function ValidateDatabaseConnectorType(connector_type) {
   const supported_connector_types = new Set([
     'mongodb',
@@ -938,6 +1076,172 @@ function ParseDatabaseConnectionLookupInput(value) {
     name,
     connector_type_hint
   };
+}
+
+function ParseSharedCreateInput(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('wpc_shared_create(params) requires an object params argument.');
+  }
+
+  if (typeof value.id !== 'string' || value.id.length === 0) {
+    throw new Error('wpc_shared_create(params) requires params.id to be a non-empty string.');
+  }
+
+  if (
+    value.type !== 'json' &&
+    value.type !== 'text' &&
+    value.type !== 'number' &&
+    value.type !== 'binary'
+  ) {
+    throw new Error(
+      'wpc_shared_create(params) requires params.type to be one of: json, text, number, binary.'
+    );
+  }
+
+  if (typeof value.note !== 'undefined' && typeof value.note !== 'string') {
+    throw new Error('wpc_shared_create(params) requires params.note to be a string when provided.');
+  }
+
+  return value;
+}
+
+function ParseSharedAccessInput(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('wpc_shared_access(params) requires an object params argument.');
+  }
+
+  if (typeof value.id !== 'string' || value.id.length === 0) {
+    throw new Error('wpc_shared_access(params) requires params.id to be a non-empty string.');
+  }
+
+  if (
+    typeof value.timeout_ms !== 'undefined' &&
+    (!Number.isInteger(value.timeout_ms) || value.timeout_ms <= 0)
+  ) {
+    throw new Error('wpc_shared_access(params) requires params.timeout_ms to be a positive integer when provided.');
+  }
+
+  return value;
+}
+
+function ParseSharedWriteInput(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('wpc_shared_write(params) requires an object params argument.');
+  }
+
+  if (typeof value.id !== 'string' || value.id.length === 0) {
+    throw new Error('wpc_shared_write(params) requires params.id to be a non-empty string.');
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(value, 'content')) {
+    throw new Error('wpc_shared_write(params) requires params.content.');
+  }
+
+  return value;
+}
+
+function ParseSharedReleaseInput(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('wpc_shared_release(params) requires an object params argument.');
+  }
+
+  if (typeof value.id !== 'string' || value.id.length === 0) {
+    throw new Error('wpc_shared_release(params) requires params.id to be a non-empty string.');
+  }
+
+  return value;
+}
+
+function ParseSharedFreeInput(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('wpc_shared_free(params) requires an object params argument.');
+  }
+
+  if (typeof value.id !== 'string' || value.id.length === 0) {
+    throw new Error('wpc_shared_free(params) requires params.id to be a non-empty string.');
+  }
+
+  if (
+    typeof value.require_unlocked !== 'undefined' &&
+    typeof value.require_unlocked !== 'boolean'
+  ) {
+    throw new Error('wpc_shared_free(params) requires params.require_unlocked to be a boolean when provided.');
+  }
+
+  return value;
+}
+
+function GetCurrentSharedCallRequestId() {
+  const active_call_context = shared_call_context_storage.getStore();
+  if (
+    !active_call_context ||
+    typeof active_call_context.call_request_id !== 'string' ||
+    active_call_context.call_request_id.length === 0
+  ) {
+    throw new Error(
+      'wpc_shared_* functions can only be used while handling an active worker call request.'
+    );
+  }
+
+  return active_call_context.call_request_id;
+}
+
+async function SendSharedRequest(params) {
+  const call_request_id = GetCurrentSharedCallRequestId();
+  const shared_request_id = 'shared_' + String(next_shared_request_id);
+  next_shared_request_id += 1;
+  const timeout_ms =
+    typeof params.timeout_ms === 'number' && Number.isInteger(params.timeout_ms)
+      ? params.timeout_ms
+      : 30000;
+
+  if (timeout_ms <= 0) {
+    throw new Error('Shared request timeout_ms must be a positive integer.');
+  }
+
+  return await new Promise(function(resolve, reject) {
+    const timeout_handle = setTimeout(function() {
+      const pending_waiter = shared_request_waiter_by_id.get(shared_request_id);
+      if (!pending_waiter) {
+        return;
+      }
+
+      shared_request_waiter_by_id.delete(shared_request_id);
+      reject(
+        new Error(
+          'Shared request "' +
+            params.command +
+            '" timed out after ' +
+            String(timeout_ms) +
+            'ms.'
+        )
+      );
+    }, timeout_ms);
+
+    shared_request_waiter_by_id.set(shared_request_id, {
+      resolve,
+      reject,
+      timeout_handle
+    });
+
+    const sent = SafePostMessage({
+      message_type: 'shared_request',
+      shared_request_id,
+      command: params.command,
+      call_request_id,
+      payload: params.payload
+    });
+
+    if (!sent) {
+      clearTimeout(timeout_handle);
+      shared_request_waiter_by_id.delete(shared_request_id);
+      reject(
+        new Error(
+          'Shared request "' + params.command + '" could not be posted to parent.'
+        )
+      );
+    }
+  });
 }
 
 function ToRecordOrEmpty(value) {
@@ -1445,10 +1749,9 @@ async function CloseAllDatabaseConnections() {
   }
 }
 
-globalThis.wpc_import = async function(alias) {
-  if (typeof alias !== 'string' || alias.length === 0) {
-    throw new Error('wpc_import(alias) requires a non-empty string alias.');
-  }
+globalThis.wpc_import = async function(alias_or_params) {
+  const lookup_input = ParseDependencyLookupInput(alias_or_params);
+  const alias = lookup_input.alias;
 
   if (!worker_dependency_registry.has(alias)) {
     throw new Error('Dependency alias "' + alias + '" is not defined on this worker.');
@@ -1494,6 +1797,47 @@ globalThis.wpc_database_connection = async function(name_or_params) {
   }
 
   return await ConnectDatabaseConnection({ name });
+};
+
+globalThis.wpc_shared_create = async function(params) {
+  const parsed_params = ParseSharedCreateInput(params);
+  await SendSharedRequest({
+    command: 'shared_create',
+    payload: parsed_params
+  });
+};
+
+globalThis.wpc_shared_access = async function(params) {
+  const parsed_params = ParseSharedAccessInput(params);
+  return await SendSharedRequest({
+    command: 'shared_access',
+    payload: parsed_params,
+    timeout_ms: parsed_params.timeout_ms
+  });
+};
+
+globalThis.wpc_shared_write = async function(params) {
+  const parsed_params = ParseSharedWriteInput(params);
+  await SendSharedRequest({
+    command: 'shared_write',
+    payload: parsed_params
+  });
+};
+
+globalThis.wpc_shared_release = async function(params) {
+  const parsed_params = ParseSharedReleaseInput(params);
+  await SendSharedRequest({
+    command: 'shared_release',
+    payload: parsed_params
+  });
+};
+
+globalThis.wpc_shared_free = async function(params) {
+  const parsed_params = ParseSharedFreeInput(params);
+  await SendSharedRequest({
+    command: 'shared_free',
+    payload: parsed_params
+  });
 };
 
 async function HandleControlRequest(message) {
@@ -1567,6 +1911,18 @@ async function HandleControlRequest(message) {
       });
 
       setImmediate(function() {
+        for (const [shared_request_id, pending_waiter] of shared_request_waiter_by_id.entries()) {
+          clearTimeout(pending_waiter.timeout_handle);
+          pending_waiter.reject(
+            new Error(
+              'Worker shutting down before shared request "' +
+                shared_request_id +
+                '" could complete.'
+            )
+          );
+          shared_request_waiter_by_id.delete(shared_request_id);
+        }
+
         void CloseAllDatabaseConnections().finally(function() {
           process.exit(0);
         });
@@ -1677,7 +2033,14 @@ async function HandleCallRequest(message) {
       database_connections: BuildDatabaseConnectionContext()
     };
 
-    const return_value = await worker_function(...call_args, function_context);
+    const return_value = await shared_call_context_storage.run(
+      {
+        call_request_id: request_id
+      },
+      async function() {
+        return await worker_function(...call_args, function_context);
+      }
+    );
     EnsureSerializable(return_value, 'Worker return value');
 
     SafePostMessage({
@@ -1706,6 +2069,50 @@ async function HandleCallRequest(message) {
   }
 }
 
+function HandleSharedResponseMessage(message) {
+  const shared_request_id = message.shared_request_id;
+  if (typeof shared_request_id !== 'string' || shared_request_id.length === 0) {
+    EmitWorkerEvent({
+      event_name: 'malformed_shared_response',
+      severity: 'warn',
+      details: {
+        reason: 'shared_request_id missing or invalid'
+      }
+    });
+    return;
+  }
+
+  const pending_waiter = shared_request_waiter_by_id.get(shared_request_id);
+  if (!pending_waiter) {
+    return;
+  }
+
+  shared_request_waiter_by_id.delete(shared_request_id);
+  clearTimeout(pending_waiter.timeout_handle);
+
+  if (message.ok) {
+    pending_waiter.resolve(message.return_value);
+    return;
+  }
+
+  const remote_error = message.error;
+  const shared_request_error = new Error(
+    remote_error && typeof remote_error.message === 'string'
+      ? remote_error.message
+      : 'Shared request failed.'
+  );
+
+  if (remote_error && typeof remote_error.name === 'string') {
+    shared_request_error.name = remote_error.name;
+  }
+
+  if (remote_error && typeof remote_error.stack === 'string') {
+    shared_request_error.stack = remote_error.stack;
+  }
+
+  pending_waiter.reject(shared_request_error);
+}
+
 async function HandleParentMessage(message) {
   if (!message || typeof message !== 'object') {
     EmitWorkerEvent({
@@ -1728,6 +2135,11 @@ async function HandleParentMessage(message) {
 
   if (message_type === 'call_request') {
     await HandleCallRequest(message);
+    return;
+  }
+
+  if (message_type === 'shared_response') {
+    HandleSharedResponseMessage(message);
     return;
   }
 
@@ -1780,6 +2192,7 @@ EmitWorkerEvent({
 export class WorkerProcedureCall {
   private lifecycle_state: lifecycle_state_t = 'stopped';
   private target_worker_count = 0;
+  private shared_memory_store = new WorkerProcedureCallSharedMemoryStore();
 
   private worker_state_by_id = new Map<number, worker_state_t>();
   private function_definition_by_name = new Map<string, worker_function_definition_t>();
@@ -2209,6 +2622,54 @@ export class WorkerProcedureCall {
       });
   }
 
+  async sharedCreate<content_t = unknown>(
+    params: shared_create_params_t<content_t>
+  ): Promise<void> {
+    await this.shared_memory_store.createChunk({
+      chunk: params
+    });
+  }
+
+  async sharedAccess<content_t = unknown>(
+    params: shared_access_params_t
+  ): Promise<content_t> {
+    return await this.shared_memory_store.accessChunk<content_t>({
+      access: params,
+      owner_context: this.getParentSharedOwnerContext()
+    });
+  }
+
+  async sharedWrite<content_t = unknown>(
+    params: shared_write_params_t<content_t>
+  ): Promise<void> {
+    await this.shared_memory_store.writeChunk({
+      write: params,
+      owner_context: this.getParentSharedOwnerContext()
+    });
+  }
+
+  async sharedRelease(params: shared_release_params_t): Promise<void> {
+    await this.shared_memory_store.releaseChunk({
+      release: params,
+      owner_context: this.getParentSharedOwnerContext()
+    });
+  }
+
+  async sharedFree(params: shared_free_params_t): Promise<void> {
+    await this.shared_memory_store.freeChunk({
+      free: params,
+      owner_context: this.getParentSharedOwnerContext()
+    });
+  }
+
+  async sharedGetLockDebugInfo(
+    params: shared_get_lock_debug_info_params_t = {}
+  ): Promise<shared_lock_debug_information_result_t> {
+    return this.shared_memory_store.getLockDebugInfo({
+      options: params
+    });
+  }
+
   async defineDatabaseConnection(
     params: define_database_connection_params_t
   ): Promise<void> {
@@ -2562,6 +3023,13 @@ export class WorkerProcedureCall {
             health_state: 'degraded',
             reason: `call timeout for ${function_name}`
           });
+
+          this.shared_memory_store.releaseLocksByOwnerId({
+            owner_id: BuildWorkerSharedOwnerId({
+              worker_id: current_worker_state.worker_id,
+              call_request_id: request_id
+            })
+          });
         }
 
         reject(
@@ -2636,6 +3104,13 @@ export class WorkerProcedureCall {
     });
 
     return call_proxy as worker_call_proxy_t;
+  }
+
+  private getParentSharedOwnerContext(): shared_lock_owner_context_t {
+    return {
+      owner_kind: 'parent',
+      owner_id: 'parent'
+    };
   }
 
   private applyRuntimeOptions(params: { options: runtime_options_t }): void {
@@ -3563,6 +4038,14 @@ export class WorkerProcedureCall {
       return;
     }
 
+    if (message_type === 'shared_request') {
+      void this.handleSharedRequestMessage({
+        worker_id,
+        message: message as worker_to_parent_message_t
+      });
+      return;
+    }
+
     this.emitParentWorkerEvent({
       worker_id,
       event_name: 'unknown_worker_message',
@@ -3644,6 +4127,147 @@ export class WorkerProcedureCall {
     });
   }
 
+  private async handleSharedRequestMessage(params: {
+    worker_id: number;
+    message: worker_to_parent_message_t;
+  }): Promise<void> {
+    const { worker_id, message } = params;
+
+    if (message.message_type !== 'shared_request') {
+      return;
+    }
+
+    const worker_state = this.worker_state_by_id.get(worker_id);
+    if (!worker_state) {
+      return;
+    }
+
+    const shared_request_id = message.shared_request_id;
+    const call_request_id = message.call_request_id;
+
+    if (typeof shared_request_id !== 'string' || shared_request_id.length === 0) {
+      this.emitParentWorkerEvent({
+        worker_id,
+        event_name: 'malformed_shared_request',
+        severity: 'warn',
+        details: {
+          reason: 'shared_request_id missing or invalid'
+        }
+      });
+      return;
+    }
+
+    if (typeof call_request_id !== 'string' || call_request_id.length === 0) {
+      this.emitParentWorkerEvent({
+        worker_id,
+        event_name: 'malformed_shared_request',
+        severity: 'warn',
+        details: {
+          reason: 'call_request_id missing or invalid',
+          shared_request_id
+        }
+      });
+      return;
+    }
+
+    const owner_context: shared_lock_owner_context_t = {
+      owner_kind: 'worker',
+      owner_id: BuildWorkerSharedOwnerId({
+        worker_id,
+        call_request_id
+      }),
+      worker_id,
+      call_request_id
+    };
+
+    let return_value: unknown = undefined;
+
+    try {
+      if (message.command === 'shared_create') {
+        const payload =
+          typeof message.payload === 'object' && message.payload !== null
+            ? message.payload
+            : {};
+        await this.shared_memory_store.createChunk({
+          chunk: payload as shared_create_params_t
+        });
+      } else if (message.command === 'shared_access') {
+        const payload =
+          typeof message.payload === 'object' && message.payload !== null
+            ? message.payload
+            : {};
+        return_value = await this.shared_memory_store.accessChunk({
+          access: payload as shared_access_params_t,
+          owner_context
+        });
+      } else if (message.command === 'shared_write') {
+        const payload =
+          typeof message.payload === 'object' && message.payload !== null
+            ? message.payload
+            : {};
+        await this.shared_memory_store.writeChunk({
+          write: payload as shared_write_params_t,
+          owner_context
+        });
+      } else if (message.command === 'shared_release') {
+        const payload =
+          typeof message.payload === 'object' && message.payload !== null
+            ? message.payload
+            : {};
+        await this.shared_memory_store.releaseChunk({
+          release: payload as shared_release_params_t,
+          owner_context
+        });
+      } else if (message.command === 'shared_free') {
+        const payload =
+          typeof message.payload === 'object' && message.payload !== null
+            ? message.payload
+            : {};
+        await this.shared_memory_store.freeChunk({
+          free: payload as shared_free_params_t,
+          owner_context
+        });
+      } else {
+        throw new Error(`Unknown shared command "${String(message.command)}".`);
+      }
+
+      worker_state.worker_instance.postMessage({
+        message_type: 'shared_response',
+        shared_request_id,
+        ok: true,
+        return_value
+      } satisfies parent_to_worker_message_t);
+    } catch (error) {
+      this.emitParentWorkerEvent({
+        worker_id,
+        event_name: 'shared_request_failed',
+        severity: 'warn',
+        correlation_id: shared_request_id,
+        error: ToRemoteError({ error }),
+        details: {
+          command: message.command
+        }
+      });
+
+      try {
+        worker_state.worker_instance.postMessage({
+          message_type: 'shared_response',
+          shared_request_id,
+          ok: false,
+          error: ToRemoteError({ error })
+        } satisfies parent_to_worker_message_t);
+      } catch (post_error) {
+        this.emitParentWorkerEvent({
+          worker_id,
+          event_name: 'shared_response_send_failed',
+          severity: 'warn',
+          correlation_id: shared_request_id,
+          error: ToRemoteError({ error: post_error })
+        });
+      }
+    }
+  }
+
   private handleCallResponseMessage(params: {
     worker_id: number;
     message: worker_to_parent_message_t;
@@ -3665,6 +4289,12 @@ export class WorkerProcedureCall {
     worker_state?.pending_call_request_ids.delete(message.request_id);
 
     clearTimeout(pending_call.timeout_handle);
+    this.shared_memory_store.releaseLocksByOwnerId({
+      owner_id: BuildWorkerSharedOwnerId({
+        worker_id,
+        call_request_id: message.request_id
+      })
+    });
 
     if (message.ok) {
       this.setWorkerHealthState({
@@ -3776,6 +4406,7 @@ export class WorkerProcedureCall {
     }
 
     this.worker_state_by_id.delete(worker_id);
+    this.shared_memory_store.releaseLocksByWorkerId({ worker_id });
 
     for (const function_definition of this.function_definition_by_name.values()) {
       function_definition.installed_worker_ids.delete(worker_id);
@@ -3955,6 +4586,12 @@ export class WorkerProcedureCall {
 
       this.pending_call_by_request_id.delete(request_id);
       clearTimeout(pending_call.timeout_handle);
+      this.shared_memory_store.releaseLocksByOwnerId({
+        owner_id: BuildWorkerSharedOwnerId({
+          worker_id: worker_state.worker_id,
+          call_request_id: request_id
+        })
+      });
       pending_call.reject(new Error(reason));
     }
 
@@ -3986,6 +4623,12 @@ export class WorkerProcedureCall {
 
     for (const [request_id, pending_call] of this.pending_call_by_request_id.entries()) {
       clearTimeout(pending_call.timeout_handle);
+      this.shared_memory_store.releaseLocksByOwnerId({
+        owner_id: BuildWorkerSharedOwnerId({
+          worker_id: pending_call.worker_id,
+          call_request_id: request_id
+        })
+      });
       pending_call.reject(reason);
       this.pending_call_by_request_id.delete(request_id);
     }
