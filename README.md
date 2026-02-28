@@ -329,13 +329,22 @@ await workerprocedurecall.defineDatabaseConnection({
   - `sharedAccess` acquires an exclusive per-chunk lock.
   - `sharedWrite`/`sharedRelease` require the same owner context that acquired the lock.
   - competing access waits until release or timeout.
+  - worker-owned locks are call-scoped (`worker:<worker_id>:<call_request_id>`).
 - Free/delete safety:
   - `sharedFree` rejects when chunk is locked by default.
   - with `require_unlocked: false`, free is allowed only when safe for the current owner context.
 - Debugging:
   - `sharedGetLockDebugInfo` reports lock holder, hold time, waiters, contention counters, timeout counters, and optional recent lock events.
+- Auto-release signals:
+  - forced lock cleanup is recorded with event names:
+    - `call_complete_auto_release`
+    - `call_timeout_auto_release`
+    - `worker_exit_auto_release`
+  - events include owner context details (`worker_id`, `call_request_id`) and lock release counts.
 - Crash/timeout cleanup:
-  - worker-owned locks are automatically reclaimed when calls finish, timeout, or worker processes exit.
+  - worker-owned locks are automatically reclaimed when calls finish, timeout, worker exits, or pending calls are rejected during shutdown.
+  - locks cannot intentionally outlive the RPC call lifecycle.
+  - background async work that continues after a worker function returns must not assume shared locks are still held.
 
 ## Public Methods
 

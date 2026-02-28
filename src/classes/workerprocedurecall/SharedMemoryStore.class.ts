@@ -37,6 +37,17 @@ export type shared_chunk_free_params_t = {
   require_unlocked?: boolean;
 };
 
+export type shared_lock_auto_release_reason_t =
+  | 'call_complete_auto_release'
+  | 'call_timeout_auto_release'
+  | 'worker_exit_auto_release'
+  | 'call_rejection_auto_release';
+
+export type shared_lock_auto_release_result_t = {
+  released_lock_count: number;
+  released_chunk_ids: string[];
+};
+
 export type shared_lock_event_t = {
   timestamp: string;
   event_name: string;
@@ -669,28 +680,57 @@ export class WorkerProcedureCallSharedMemoryStore {
     return debug_information;
   }
 
-  releaseLocksByOwnerId(params: { owner_id: string }): void {
-    const { owner_id } = params;
+  releaseLocksByOwnerId(params: {
+    owner_id: string;
+    release_reason: shared_lock_auto_release_reason_t;
+    worker_id?: number;
+    call_request_id?: string;
+  }): shared_lock_auto_release_result_t {
+    const { owner_id, release_reason, worker_id, call_request_id } = params;
+    const released_chunk_ids: string[] = [];
 
     for (const chunk of this.chunk_by_id.values()) {
       if (chunk.lock_owner?.owner_id !== owner_id) {
         continue;
       }
 
+      const lock_owner = chunk.lock_owner;
+      const event_worker_id =
+        typeof worker_id === 'number' ? worker_id : lock_owner?.worker_id ?? null;
+      const event_call_request_id =
+        typeof call_request_id === 'string'
+          ? call_request_id
+          : lock_owner?.call_request_id ?? null;
+
+      released_chunk_ids.push(chunk.id);
       this.recordLockEvent({
-        event_name: 'chunk_lock_force_released',
+        event_name: release_reason,
         chunk_id: chunk.id,
-        owner_id
+        owner_id,
+        details: {
+          worker_id: event_worker_id,
+          call_request_id: event_call_request_id,
+          lock_count_released: 1
+        }
       });
 
       this.releaseChunkLockInternal({
         chunk
       });
     }
+
+    return {
+      released_lock_count: released_chunk_ids.length,
+      released_chunk_ids
+    };
   }
 
-  releaseLocksByWorkerId(params: { worker_id: number }): void {
-    const { worker_id } = params;
+  releaseLocksByWorkerId(params: {
+    worker_id: number;
+    release_reason?: shared_lock_auto_release_reason_t;
+  }): shared_lock_auto_release_result_t {
+    const { worker_id, release_reason = 'worker_exit_auto_release' } = params;
+    const released_chunk_ids: string[] = [];
 
     for (const chunk of this.chunk_by_id.values()) {
       if (chunk.lock_owner?.owner_kind !== 'worker') {
@@ -701,12 +741,16 @@ export class WorkerProcedureCallSharedMemoryStore {
         continue;
       }
 
+      const lock_owner = chunk.lock_owner;
+      released_chunk_ids.push(chunk.id);
       this.recordLockEvent({
-        event_name: 'chunk_lock_force_released_worker_exit',
+        event_name: release_reason,
         chunk_id: chunk.id,
-        owner_id: chunk.lock_owner.owner_id,
+        owner_id: lock_owner.owner_id,
         details: {
-          worker_id
+          worker_id,
+          call_request_id: lock_owner.call_request_id ?? null,
+          lock_count_released: 1
         }
       });
 
@@ -714,6 +758,11 @@ export class WorkerProcedureCallSharedMemoryStore {
         chunk
       });
     }
+
+    return {
+      released_lock_count: released_chunk_ids.length,
+      released_chunk_ids
+    };
   }
 
   private getActiveChunkById(params: { id: string }): shared_chunk_record_t {

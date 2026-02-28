@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { WorkerProcedureCall } from '../../src/index';
+import { WorkerProcedureCall, type worker_event_t } from '../../src/index';
 
 async function Sleep(params: { delay_ms: number }): Promise<void> {
   const { delay_ms } = params;
@@ -201,6 +201,288 @@ test('worker shared lock contention serializes writes safely', async function ()
   }
 });
 
+test('shared lock leaks are auto-released after successful worker calls', async function () {
+  const workerprocedurecall = new WorkerProcedureCall();
+  const observed_worker_event_list: worker_event_t[] = [];
+  const listener_id = workerprocedurecall.onWorkerEvent({
+    listener: (worker_event): void => {
+      observed_worker_event_list.push(worker_event);
+    }
+  });
+
+  try {
+    await workerprocedurecall.startWorkers({
+      count: 1
+    });
+
+    await workerprocedurecall.sharedCreate({
+      id: 'shared_auto_release_success_1',
+      type: 'text',
+      content: 'success_value'
+    });
+
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'AcquireSharedWithoutReleaseAndReturn',
+      worker_func: async function (params: { id: string }): Promise<string> {
+        const value = await wpc_shared_access<string>({
+          id: params.id
+        });
+        return value;
+      }
+    });
+
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'AcquireReleaseSharedAndReturn',
+      worker_func: async function (params: { id: string }): Promise<string> {
+        const value = await wpc_shared_access<string>({
+          id: params.id
+        });
+        await wpc_shared_release({
+          id: params.id
+        });
+        return value;
+      }
+    });
+
+    const first_result = await workerprocedurecall.call.AcquireSharedWithoutReleaseAndReturn({
+      id: 'shared_auto_release_success_1'
+    });
+    assert.equal(first_result, 'success_value');
+
+    const second_result = await workerprocedurecall.call.AcquireReleaseSharedAndReturn({
+      id: 'shared_auto_release_success_1'
+    });
+    assert.equal(second_result, 'success_value');
+
+    const lock_debug_information = await workerprocedurecall.sharedGetLockDebugInfo({
+      include_history: true
+    });
+    const auto_release_event = lock_debug_information.recent_events?.find((event_entry) => {
+      return (
+        event_entry.chunk_id === 'shared_auto_release_success_1' &&
+        event_entry.event_name === 'call_complete_auto_release'
+      );
+    });
+    assert(auto_release_event);
+    assert.equal(typeof auto_release_event.details?.worker_id, 'number');
+    assert.equal(typeof auto_release_event.details?.call_request_id, 'string');
+    assert.equal(auto_release_event.details?.lock_count_released, 1);
+
+    const parent_auto_release_event = observed_worker_event_list.find((event_entry) => {
+      return (
+        event_entry.source === 'parent' &&
+        event_entry.event_name === 'call_complete_auto_release'
+      );
+    });
+    assert(parent_auto_release_event);
+    assert.equal(typeof parent_auto_release_event.details?.lock_count_released, 'number');
+    assert.equal(typeof parent_auto_release_event.details?.call_request_id, 'string');
+  } finally {
+    workerprocedurecall.offWorkerEvent({
+      listener_id
+    });
+    await workerprocedurecall.stopWorkers();
+  }
+});
+
+test('shared lock leaks are auto-released when worker call throws', async function () {
+  const workerprocedurecall = new WorkerProcedureCall();
+
+  try {
+    await workerprocedurecall.startWorkers({
+      count: 1
+    });
+
+    await workerprocedurecall.sharedCreate({
+      id: 'shared_auto_release_throw_1',
+      type: 'text',
+      content: 'throw_value'
+    });
+
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'AcquireSharedThenThrow',
+      worker_func: async function (params: { id: string }): Promise<void> {
+        await wpc_shared_access<string>({
+          id: params.id
+        });
+        throw new Error('intentional_throw_after_lock');
+      }
+    });
+
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'AcquireReleaseSharedAfterThrow',
+      worker_func: async function (params: { id: string }): Promise<string> {
+        const value = await wpc_shared_access<string>({
+          id: params.id
+        });
+        await wpc_shared_release({
+          id: params.id
+        });
+        return value;
+      }
+    });
+
+    await assert.rejects(
+      async function (): Promise<unknown> {
+        return await workerprocedurecall.call.AcquireSharedThenThrow({
+          id: 'shared_auto_release_throw_1'
+        });
+      },
+      /intentional_throw_after_lock/i
+    );
+
+    const recovered_value = await workerprocedurecall.call.AcquireReleaseSharedAfterThrow({
+      id: 'shared_auto_release_throw_1'
+    });
+    assert.equal(recovered_value, 'throw_value');
+  } finally {
+    await workerprocedurecall.stopWorkers();
+  }
+});
+
+test('shared lock leaks are auto-released on worker call timeout', async function () {
+  const workerprocedurecall = new WorkerProcedureCall({
+    call_timeout_ms: 50
+  });
+
+  try {
+    await workerprocedurecall.startWorkers({
+      count: 2
+    });
+
+    await workerprocedurecall.sharedCreate({
+      id: 'shared_auto_release_timeout_1',
+      type: 'text',
+      content: 'timeout_value'
+    });
+
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'AcquireSharedAndSleepPastTimeout',
+      worker_func: async function (params: {
+        id: string;
+        delay_ms: number;
+      }): Promise<string> {
+        const value = await wpc_shared_access<string>({
+          id: params.id
+        });
+
+        await new Promise((resolve): void => {
+          setTimeout(resolve, params.delay_ms);
+        });
+
+        return value;
+      }
+    });
+
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'AcquireReleaseSharedAfterTimeout',
+      worker_func: async function (params: { id: string }): Promise<string> {
+        const value = await wpc_shared_access<string>({
+          id: params.id
+        });
+        await wpc_shared_release({
+          id: params.id
+        });
+        return value;
+      }
+    });
+
+    await assert.rejects(
+      async function (): Promise<unknown> {
+        return await workerprocedurecall.call.AcquireSharedAndSleepPastTimeout({
+          id: 'shared_auto_release_timeout_1',
+          delay_ms: 600
+        });
+      },
+      /timed out/i
+    );
+
+    const second_call_start_timestamp_ms = Date.now();
+    const recovered_value = await workerprocedurecall.call.AcquireReleaseSharedAfterTimeout({
+      id: 'shared_auto_release_timeout_1'
+    });
+    const second_call_elapsed_ms = Date.now() - second_call_start_timestamp_ms;
+
+    assert.equal(recovered_value, 'timeout_value');
+    assert.ok(
+      second_call_elapsed_ms < 450,
+      `Expected post-timeout lock acquisition to be reclaimed quickly; took ${second_call_elapsed_ms}ms.`
+    );
+
+    const lock_debug_information = await workerprocedurecall.sharedGetLockDebugInfo({
+      include_history: true
+    });
+    const timeout_auto_release_event = lock_debug_information.recent_events?.find(
+      (event_entry) => {
+        return (
+          event_entry.chunk_id === 'shared_auto_release_timeout_1' &&
+          event_entry.event_name === 'call_timeout_auto_release'
+        );
+      }
+    );
+    assert(timeout_auto_release_event);
+    assert.equal(typeof timeout_auto_release_event.details?.worker_id, 'number');
+    assert.equal(typeof timeout_auto_release_event.details?.call_request_id, 'string');
+    assert.equal(timeout_auto_release_event.details?.lock_count_released, 1);
+  } finally {
+    await workerprocedurecall.stopWorkers();
+  }
+});
+
+test('manual shared release is idempotent with automatic lifecycle release checks', async function () {
+  const workerprocedurecall = new WorkerProcedureCall();
+
+  try {
+    await workerprocedurecall.startWorkers({
+      count: 1
+    });
+
+    await workerprocedurecall.sharedCreate({
+      id: 'shared_manual_release_idempotent_1',
+      type: 'number',
+      content: 9
+    });
+
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'AcquireReleaseSharedNumber',
+      worker_func: async function (params: { id: string }): Promise<number> {
+        const value = await wpc_shared_access<number>({
+          id: params.id
+        });
+        await wpc_shared_release({
+          id: params.id
+        });
+        return value;
+      }
+    });
+
+    const first_value = await workerprocedurecall.call.AcquireReleaseSharedNumber({
+      id: 'shared_manual_release_idempotent_1'
+    });
+    assert.equal(first_value, 9);
+
+    const second_value = await workerprocedurecall.call.AcquireReleaseSharedNumber({
+      id: 'shared_manual_release_idempotent_1'
+    });
+    assert.equal(second_value, 9);
+
+    const lock_debug_information = await workerprocedurecall.sharedGetLockDebugInfo({
+      include_history: true
+    });
+    const call_complete_auto_release_events =
+      lock_debug_information.recent_events?.filter((event_entry) => {
+        return (
+          event_entry.chunk_id === 'shared_manual_release_idempotent_1' &&
+          event_entry.event_name === 'call_complete_auto_release'
+        );
+      }) ?? [];
+
+    assert.equal(call_complete_auto_release_events.length, 0);
+  } finally {
+    await workerprocedurecall.stopWorkers();
+  }
+});
+
 test('shared lock is reclaimed when worker exits unexpectedly', async function () {
   const workerprocedurecall = new WorkerProcedureCall({
     restart_on_failure: false
@@ -267,6 +549,25 @@ test('shared lock is reclaimed when worker exits unexpectedly', async function (
     });
 
     assert.equal(post_crash_value, 'still_available');
+
+    const lock_debug_information = await workerprocedurecall.sharedGetLockDebugInfo({
+      include_history: true
+    });
+    const worker_exit_auto_release_event = lock_debug_information.recent_events?.find(
+      (event_entry) => {
+        return (
+          event_entry.chunk_id === 'shared_worker_crash_lock_1' &&
+          event_entry.event_name === 'worker_exit_auto_release'
+        );
+      }
+    );
+    assert(worker_exit_auto_release_event);
+    assert.equal(typeof worker_exit_auto_release_event.details?.worker_id, 'number');
+    assert.equal(
+      typeof worker_exit_auto_release_event.details?.call_request_id,
+      'string'
+    );
+    assert.equal(worker_exit_auto_release_event.details?.lock_count_released, 1);
   } finally {
     await workerprocedurecall.stopWorkers();
   }

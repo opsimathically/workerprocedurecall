@@ -146,6 +146,67 @@ type shared_profile_t = {
       }
     });
 
+    // Demonstrates call-scoped lock auto-release on successful return.
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'WPCFunctionSharedLeakLockAndReturn',
+      worker_func: async function (params: {
+        shared_chunk_id: string;
+      }): Promise<number> {
+        const shared_profile = await wpc_shared_access<shared_profile_t>({
+          id: params.shared_chunk_id,
+          timeout_ms: 5_000
+        });
+
+        const next_request_count = shared_profile.request_count + 1;
+
+        await wpc_shared_write<shared_profile_t>({
+          id: params.shared_chunk_id,
+          content: {
+            ...shared_profile,
+            request_count: next_request_count
+          }
+        });
+
+        // Intentionally do not call wpc_shared_release(...) here.
+        // The parent will reclaim this lock when the call completes.
+        return next_request_count;
+      }
+    });
+
+    // Demonstrates call-scoped lock auto-release on thrown errors.
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'WPCFunctionSharedLeakLockAndThrow',
+      worker_func: async function (params: {
+        shared_chunk_id: string;
+      }): Promise<void> {
+        await wpc_shared_access<shared_profile_t>({
+          id: params.shared_chunk_id,
+          timeout_ms: 5_000
+        });
+
+        throw new Error('intentional shared lock leak + throw');
+      }
+    });
+
+    // Helper to prove lock can still be acquired after auto-release.
+    await workerprocedurecall.defineWorkerFunction({
+      name: 'WPCFunctionSharedReadAndRelease',
+      worker_func: async function (params: {
+        shared_chunk_id: string;
+      }): Promise<number> {
+        const shared_profile = await wpc_shared_access<shared_profile_t>({
+          id: params.shared_chunk_id,
+          timeout_ms: 5_000
+        });
+
+        await wpc_shared_release({
+          id: params.shared_chunk_id
+        });
+
+        return shared_profile.request_count;
+      }
+    });
+
     await workerprocedurecall.defineWorkerFunction({
       name: 'WPCFunctionDb',
       worker_func: async function (params: {
@@ -212,17 +273,63 @@ type shared_profile_t = {
       await workerprocedurecall.call.WPCFunctionSharedIncrement({
         shared_chunk_id: 'shared_profile_1'
       });
+    const leaked_lock_success_count =
+      await workerprocedurecall.call.WPCFunctionSharedLeakLockAndReturn({
+        shared_chunk_id: 'shared_profile_1'
+      });
+    const read_after_success_auto_release =
+      await workerprocedurecall.call.WPCFunctionSharedReadAndRelease({
+        shared_chunk_id: 'shared_profile_1'
+      });
+
+    try {
+      await workerprocedurecall.call.WPCFunctionSharedLeakLockAndThrow({
+        shared_chunk_id: 'shared_profile_1'
+      });
+    } catch (error) {
+      console.log(
+        'WPCFunctionSharedLeakLockAndThrow call error (expected):',
+        error
+      );
+    }
+
+    const read_after_error_auto_release =
+      await workerprocedurecall.call.WPCFunctionSharedReadAndRelease({
+        shared_chunk_id: 'shared_profile_1'
+      });
 
     console.log('WPCFunction1 return:', return_val_1);
     console.log('WPCFunction2 return:', return_val_2);
     console.log('WPCFunctionDb return:', return_val_db);
     console.log('WPCFunctionSharedIncrement return:', shared_next_count);
+    console.log(
+      'WPCFunctionSharedLeakLockAndReturn return:',
+      leaked_lock_success_count
+    );
+    console.log(
+      'WPCFunctionSharedReadAndRelease after success auto-release return:',
+      read_after_success_auto_release
+    );
+    console.log(
+      'WPCFunctionSharedReadAndRelease after error auto-release return:',
+      read_after_error_auto_release
+    );
 
     const shared_lock_debug_information =
       await workerprocedurecall.sharedGetLockDebugInfo({
         include_history: true
       });
     console.log('Shared lock debug info:', shared_lock_debug_information);
+    const auto_release_event_list =
+      shared_lock_debug_information.recent_events?.filter((event_entry) => {
+        return (
+          event_entry.chunk_id === 'shared_profile_1' &&
+          (event_entry.event_name === 'call_complete_auto_release' ||
+            event_entry.event_name === 'call_timeout_auto_release' ||
+            event_entry.event_name === 'worker_exit_auto_release')
+        );
+      }) ?? [];
+    console.log('Shared auto-release events:', auto_release_event_list);
 
     try {
       await workerprocedurecall.call.WPCFunctionTriggerEvent();
@@ -245,6 +352,15 @@ type shared_profile_t = {
       id: 'shared_profile_1'
     });
     await workerprocedurecall.undefineWorkerDependency({ alias: 'crypto_dep' });
+    await workerprocedurecall.undefineWokerFunction({
+      name: 'WPCFunctionSharedReadAndRelease'
+    });
+    await workerprocedurecall.undefineWokerFunction({
+      name: 'WPCFunctionSharedLeakLockAndThrow'
+    });
+    await workerprocedurecall.undefineWokerFunction({
+      name: 'WPCFunctionSharedLeakLockAndReturn'
+    });
     await workerprocedurecall.undefineWokerFunction({
       name: 'WPCFunctionSharedIncrement'
     });

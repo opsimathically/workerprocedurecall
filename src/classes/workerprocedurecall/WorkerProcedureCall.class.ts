@@ -7,6 +7,7 @@ import type {
 } from 'mysql2/promise';
 import {
   WorkerProcedureCallSharedMemoryStore,
+  type shared_lock_auto_release_reason_t,
   type shared_chunk_access_params_t,
   type shared_chunk_create_params_t,
   type shared_chunk_free_params_t,
@@ -3014,6 +3015,12 @@ export class WorkerProcedureCall {
           return;
         }
 
+        this.autoReleaseSharedLocksByOwnerId({
+          worker_id: worker_state.worker_id,
+          call_request_id: request_id,
+          release_reason: 'call_timeout_auto_release'
+        });
+
         this.pending_call_by_request_id.delete(request_id);
         const current_worker_state = this.worker_state_by_id.get(worker_state.worker_id);
         current_worker_state?.pending_call_request_ids.delete(request_id);
@@ -3022,13 +3029,6 @@ export class WorkerProcedureCall {
             worker_id: current_worker_state.worker_id,
             health_state: 'degraded',
             reason: `call timeout for ${function_name}`
-          });
-
-          this.shared_memory_store.releaseLocksByOwnerId({
-            owner_id: BuildWorkerSharedOwnerId({
-              worker_id: current_worker_state.worker_id,
-              call_request_id: request_id
-            })
           });
         }
 
@@ -3060,6 +3060,11 @@ export class WorkerProcedureCall {
         worker_state.worker_instance.postMessage(message);
       } catch (error) {
         clearTimeout(timeout_handle);
+        this.autoReleaseSharedLocksByOwnerId({
+          worker_id: worker_state.worker_id,
+          call_request_id: request_id,
+          release_reason: 'call_rejection_auto_release'
+        });
         worker_state.pending_call_request_ids.delete(request_id);
         this.pending_call_by_request_id.delete(request_id);
         this.setWorkerHealthState({
@@ -3111,6 +3116,105 @@ export class WorkerProcedureCall {
       owner_kind: 'parent',
       owner_id: 'parent'
     };
+  }
+
+  private getAutoReleaseEventSeverity(params: {
+    release_reason: shared_lock_auto_release_reason_t;
+  }): worker_event_severity_t {
+    const { release_reason } = params;
+    if (
+      release_reason === 'call_timeout_auto_release' ||
+      release_reason === 'worker_exit_auto_release'
+    ) {
+      return 'warn';
+    }
+
+    return 'info';
+  }
+
+  private autoReleaseSharedLocksByOwnerId(params: {
+    worker_id: number;
+    call_request_id: string;
+    release_reason: shared_lock_auto_release_reason_t;
+  }): void {
+    const { worker_id, call_request_id, release_reason } = params;
+    const owner_id = BuildWorkerSharedOwnerId({
+      worker_id,
+      call_request_id
+    });
+
+    try {
+      const release_result = this.shared_memory_store.releaseLocksByOwnerId({
+        owner_id,
+        release_reason,
+        worker_id,
+        call_request_id
+      });
+
+      if (release_result.released_lock_count > 0) {
+        this.emitParentWorkerEvent({
+          worker_id,
+          event_name: release_reason,
+          severity: this.getAutoReleaseEventSeverity({ release_reason }),
+          correlation_id: call_request_id,
+          details: {
+            owner_id,
+            call_request_id,
+            lock_count_released: release_result.released_lock_count,
+            released_chunk_ids: release_result.released_chunk_ids
+          }
+        });
+      }
+    } catch (error) {
+      this.emitParentWorkerEvent({
+        worker_id,
+        event_name: 'shared_lock_auto_release_failed',
+        severity: 'warn',
+        correlation_id: call_request_id,
+        error: ToRemoteError({ error }),
+        details: {
+          owner_id,
+          call_request_id,
+          release_reason
+        }
+      });
+    }
+  }
+
+  private autoReleaseSharedLocksByWorkerId(params: {
+    worker_id: number;
+    release_reason: shared_lock_auto_release_reason_t;
+  }): void {
+    const { worker_id, release_reason } = params;
+    try {
+      const release_result = this.shared_memory_store.releaseLocksByWorkerId({
+        worker_id,
+        release_reason
+      });
+
+      if (release_result.released_lock_count > 0) {
+        this.emitParentWorkerEvent({
+          worker_id,
+          event_name: release_reason,
+          severity: this.getAutoReleaseEventSeverity({ release_reason }),
+          details: {
+            lock_count_released: release_result.released_lock_count,
+            released_chunk_ids: release_result.released_chunk_ids
+          }
+        });
+      }
+    } catch (error) {
+      this.emitParentWorkerEvent({
+        worker_id,
+        event_name: 'shared_lock_auto_release_failed',
+        severity: 'warn',
+        error: ToRemoteError({ error }),
+        details: {
+          worker_id,
+          release_reason
+        }
+      });
+    }
   }
 
   private applyRuntimeOptions(params: { options: runtime_options_t }): void {
@@ -4170,6 +4274,41 @@ export class WorkerProcedureCall {
       return;
     }
 
+    if (!worker_state.pending_call_request_ids.has(call_request_id)) {
+      this.emitParentWorkerEvent({
+        worker_id,
+        event_name: 'stale_shared_request',
+        severity: 'warn',
+        correlation_id: call_request_id,
+        details: {
+          shared_request_id,
+          command: message.command,
+          reason: 'call_request_id is no longer active'
+        }
+      });
+
+      try {
+        worker_state.worker_instance.postMessage({
+          message_type: 'shared_response',
+          shared_request_id,
+          ok: false,
+          error: {
+            name: 'Error',
+            message: `Shared request "${message.command}" rejected because call "${call_request_id}" is no longer active.`
+          }
+        } satisfies parent_to_worker_message_t);
+      } catch (post_error) {
+        this.emitParentWorkerEvent({
+          worker_id,
+          event_name: 'shared_response_send_failed',
+          severity: 'warn',
+          correlation_id: shared_request_id,
+          error: ToRemoteError({ error: post_error })
+        });
+      }
+      return;
+    }
+
     const owner_context: shared_lock_owner_context_t = {
       owner_kind: 'worker',
       owner_id: BuildWorkerSharedOwnerId({
@@ -4283,18 +4422,16 @@ export class WorkerProcedureCall {
       return;
     }
 
+    clearTimeout(pending_call.timeout_handle);
+    this.autoReleaseSharedLocksByOwnerId({
+      worker_id,
+      call_request_id: message.request_id,
+      release_reason: 'call_complete_auto_release'
+    });
     this.pending_call_by_request_id.delete(message.request_id);
 
     const worker_state = this.worker_state_by_id.get(worker_id);
     worker_state?.pending_call_request_ids.delete(message.request_id);
-
-    clearTimeout(pending_call.timeout_handle);
-    this.shared_memory_store.releaseLocksByOwnerId({
-      owner_id: BuildWorkerSharedOwnerId({
-        worker_id,
-        call_request_id: message.request_id
-      })
-    });
 
     if (message.ok) {
       this.setWorkerHealthState({
@@ -4406,7 +4543,10 @@ export class WorkerProcedureCall {
     }
 
     this.worker_state_by_id.delete(worker_id);
-    this.shared_memory_store.releaseLocksByWorkerId({ worker_id });
+    this.autoReleaseSharedLocksByWorkerId({
+      worker_id,
+      release_reason: 'worker_exit_auto_release'
+    });
 
     for (const function_definition of this.function_definition_by_name.values()) {
       function_definition.installed_worker_ids.delete(worker_id);
@@ -4586,11 +4726,10 @@ export class WorkerProcedureCall {
 
       this.pending_call_by_request_id.delete(request_id);
       clearTimeout(pending_call.timeout_handle);
-      this.shared_memory_store.releaseLocksByOwnerId({
-        owner_id: BuildWorkerSharedOwnerId({
-          worker_id: worker_state.worker_id,
-          call_request_id: request_id
-        })
+      this.autoReleaseSharedLocksByOwnerId({
+        worker_id: worker_state.worker_id,
+        call_request_id: request_id,
+        release_reason: 'call_rejection_auto_release'
       });
       pending_call.reject(new Error(reason));
     }
@@ -4623,11 +4762,10 @@ export class WorkerProcedureCall {
 
     for (const [request_id, pending_call] of this.pending_call_by_request_id.entries()) {
       clearTimeout(pending_call.timeout_handle);
-      this.shared_memory_store.releaseLocksByOwnerId({
-        owner_id: BuildWorkerSharedOwnerId({
-          worker_id: pending_call.worker_id,
-          call_request_id: request_id
-        })
+      this.autoReleaseSharedLocksByOwnerId({
+        worker_id: pending_call.worker_id,
+        call_request_id: request_id,
+        release_reason: 'call_rejection_auto_release'
       });
       pending_call.reject(reason);
       this.pending_call_by_request_id.delete(request_id);
