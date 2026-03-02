@@ -50,42 +50,42 @@ External infrastructure still commonly provides internet edge (DNS/anycast/WAF/C
 ## 4) Ideal Multi-Region Topology Diagram
 ```mermaid
 flowchart TB
-  subgraph Z1[Public Edge Trust Boundary]
-    client[Client SDK Consumers]
-    edge[External Edge LB / WAF / DNS / Anycast\n(External, Optional but Recommended)]
+  subgraph Z1["Public Edge Trust Boundary"]
+    client["Client SDK Consumers"]
+    edge["External Edge LB / WAF / DNS / Anycast<br/>External, Optional but Recommended"]
     client --> edge
   end
 
-  subgraph Z2[Gateway Tier Trust Boundary]
-    g1[Global Ingress Server A\nClusterIngressBalancerService]
-    g2[Global Ingress Server B\nClusterIngressBalancerService]
+  subgraph Z2["Gateway Tier Trust Boundary"]
+    g1["Global Ingress Server A<br/>ClusterIngressBalancerService"]
+    g2["Global Ingress Server B<br/>ClusterIngressBalancerService"]
     edge --> g1
     edge --> g2
   end
 
-  subgraph Z3[Service Tier Trust Boundary]
-    subgraph R1[Region us-east-1]
-      ri1a[Regional Ingress A]
-      ri1b[Regional Ingress B]
-      na1a[Node Agent Server A]
-      na1b[Node Agent Server B]
-      wpc1a[WorkerProcedureCall Runtime A]
-      wpc1b[WorkerProcedureCall Runtime B]
-      wt1a[Worker Thread Pool A]
-      wt1b[Worker Thread Pool B]
+  subgraph Z3["Service Tier Trust Boundary"]
+    subgraph R1["Region us-east-1"]
+      ri1a["Regional Ingress A"]
+      ri1b["Regional Ingress B"]
+      na1a["Node Agent Server A"]
+      na1b["Node Agent Server B"]
+      wpc1a["WorkerProcedureCall Runtime A"]
+      wpc1b["WorkerProcedureCall Runtime B"]
+      wt1a["Worker Thread Pool A"]
+      wt1b["Worker Thread Pool B"]
       ri1a --> na1a --> wpc1a --> wt1a
       ri1b --> na1b --> wpc1b --> wt1b
     end
 
-    subgraph R2[Region us-west-1]
-      ri2a[Regional Ingress A]
-      ri2b[Regional Ingress B]
-      na2a[Node Agent Server A]
-      na2b[Node Agent Server B]
-      wpc2a[WorkerProcedureCall Runtime A]
-      wpc2b[WorkerProcedureCall Runtime B]
-      wt2a[Worker Thread Pool A]
-      wt2b[Worker Thread Pool B]
+    subgraph R2["Region us-west-1"]
+      ri2a["Regional Ingress A"]
+      ri2b["Regional Ingress B"]
+      na2a["Node Agent Server A"]
+      na2b["Node Agent Server B"]
+      wpc2a["WorkerProcedureCall Runtime A"]
+      wpc2b["WorkerProcedureCall Runtime B"]
+      wt2a["Worker Thread Pool A"]
+      wt2b["Worker Thread Pool B"]
       ri2a --> na2a --> wpc2a --> wt2a
       ri2b --> na2b --> wpc2b --> wt2b
     end
@@ -96,16 +96,16 @@ flowchart TB
     g2 --> ri2b
   end
 
-  subgraph Z4[Control-Plane Tier Trust Boundary]
-    geo1[Geo Ingress Control Plane Node 1]
-    geo2[Geo Ingress Control Plane Node 2]
-    geo3[Geo Ingress Control Plane Node 3]
-    cp1[Control Plane Node 1]
-    cp2[Control Plane Node 2]
-    cp3[Control Plane Node 3]
-    d1[Discovery HA Daemon 1]
-    d2[Discovery HA Daemon 2]
-    d3[Discovery HA Daemon 3]
+  subgraph Z4["Control-Plane Tier Trust Boundary"]
+    geo1["Geo Ingress Control Plane Node 1"]
+    geo2["Geo Ingress Control Plane Node 2"]
+    geo3["Geo Ingress Control Plane Node 3"]
+    cp1["Control Plane Node 1"]
+    cp2["Control Plane Node 2"]
+    cp3["Control Plane Node 3"]
+    d1["Discovery HA Daemon 1"]
+    d2["Discovery HA Daemon 2"]
+    d3["Discovery HA Daemon 3"]
     geo1 <--> geo2
     geo2 <--> geo3
     geo3 <--> geo1
@@ -117,9 +117,9 @@ flowchart TB
     d3 <--> d1
   end
 
-  subgraph Z5[Data/Ops Tier Trust Boundary]
-    auth[Auth Boundary\nmTLS + token validation + replay checks]
-    obs[Observability Stack\nmetrics/logs/events/audit]
+  subgraph Z5["Data/Ops Tier Trust Boundary"]
+    auth["Auth Boundary<br/>mTLS + token validation + replay checks"]
+    obs["Observability Stack<br/>metrics/logs/events/audit"]
   end
 
   g1 --> auth
@@ -161,21 +161,21 @@ Why each tier exists:
 ## 5) Single-Region Simplified Topology Diagram
 ```mermaid
 flowchart LR
-  client[Client SDK] --> edge[External LB/WAF]
-  edge --> globalIngressA[Global Ingress A]
-  edge --> globalIngressB[Global Ingress B]
-  globalIngressA --> regionalIngressA[Regional Ingress A]
-  globalIngressB --> regionalIngressB[Regional Ingress B]
-  regionalIngressA --> nodeA[Node Agent A]
-  regionalIngressB --> nodeB[Node Agent B]
-  nodeA --> wpcA[WorkerProcedureCall A] --> workersA[Worker Threads A]
-  nodeB --> wpcB[WorkerProcedureCall B] --> workersB[Worker Threads B]
-  globalIngressA <--> geoCP[Geo Ingress Control Plane x3]
-  nodeA <--> cp[Control Plane x3]
-  nodeA <--> discovery[Discovery HA x3]
+  client["Client SDK"] --> edge["External LB/WAF"]
+  edge --> globalIngressA["Global Ingress A"]
+  edge --> globalIngressB["Global Ingress B"]
+  globalIngressA --> regionalIngressA["Regional Ingress A"]
+  globalIngressB --> regionalIngressB["Regional Ingress B"]
+  regionalIngressA --> nodeA["Node Agent A"]
+  regionalIngressB --> nodeB["Node Agent B"]
+  nodeA --> wpcA["WorkerProcedureCall A"] --> workersA["Worker Threads A"]
+  nodeB --> wpcB["WorkerProcedureCall B"] --> workersB["Worker Threads B"]
+  globalIngressA <--> geoCP["Geo Ingress Control Plane x3"]
+  nodeA <--> cp["Control Plane x3"]
+  nodeA <--> discovery["Discovery HA x3"]
   nodeB <--> cp
   nodeB <--> discovery
-  globalIngressA --> obs[Observability]
+  globalIngressA --> obs["Observability"]
   nodeA --> obs
   cp --> obs
 ```
