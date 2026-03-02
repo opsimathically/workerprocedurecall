@@ -13,6 +13,8 @@
     "benchmark:worker-vs-single-sha1-heavy": "node --require ts-node/register --require tsconfig-paths/register benchmarking/worker_vs_single_thread_sha1_heavy.benchmark.ts",
     "benchmark:shared-vs-ipc": "node --require ts-node/register --require tsconfig-paths/register benchmarking/shared_memory_vs_ipc.benchmark.ts",
     "benchmark:shared-vs-ipc-heavy": "node --require ts-node/register --require tsconfig-paths/register benchmarking/shared_memory_vs_ipc_heavy.benchmark.ts",
+    "manual:network-transport-mvp": "node --require ts-node/register --require tsconfig-paths/register manual_testing/network_transport_mvp.ts",
+    "test:chaos-phase13": "node --require ts-node/register --require tsconfig-paths/register --test test/any_test/cluster_operations_phase13.test.ts",
     "ts-to-zod": "npx ts-to-zod",
     "docs": "typedoc"
   },

@@ -507,14 +507,602 @@ Each event `MUST` include:
 3. `node_id` (if available)
 4. `timestamp_unix_ms`
 
-## 14. Backward Compatibility and Evolution
+## 14. Remote Administrative Mutation Plane
+
+## 14.1 Plane Separation
+
+The protocol defines two orthogonal planes:
+
+1. Data plane: remote function call execution (`cluster_call_*` messages).
+2. Control/mutation plane: hot definition/redefinition/undefinition and administrative mutations (`cluster_admin_mutation_*` messages).
+
+Requirements:
+
+1. Mutation-plane authorization `MUST` be enforced independently from data-plane call authorization.
+2. A principal with `rpc.call:*` permissions `MUST NOT` be implicitly granted mutation privileges.
+3. Mutation-plane operations `MUST` be fully auditable (Section 14.7).
+
+## 14.2 Mutation Types and Scope
+
+### 14.2.1 Required mutation types
+
+`mutation_type` `MUST` support at minimum:
+
+1. `define_function`
+2. `redefine_function`
+3. `undefine_function`
+4. `define_dependency`
+5. `undefine_dependency`
+6. `define_constant`
+7. `undefine_constant`
+8. `define_database_connection`
+9. `undefine_database_connection`
+
+### 14.2.2 Shared-memory admin mutation types
+
+Where shared-memory administrative operations are enabled, `mutation_type` `MAY` additionally include:
+
+1. `shared_create_chunk`
+2. `shared_free_chunk`
+3. `shared_reconfigure_limits`
+4. `shared_clear_all_chunks` (break-glass only; production guarded)
+
+### 14.2.3 Target scope
+
+`target_scope` values:
+
+1. `single_node`
+2. `node_selector`
+3. `cluster_wide`
+
+## 14.3 Wire Message Schemas (Normative)
+
+### 14.3.1 `cluster_admin_mutation_request`
+
+```json
+{
+  "protocol_version": 1,
+  "message_type": "cluster_admin_mutation_request",
+  "timestamp_unix_ms": 0,
+  "mutation_id": "mut_...",
+  "request_id": "req_...",
+  "trace_id": "trace_...",
+  "deadline_unix_ms": 0,
+  "target_scope": "single_node | node_selector | cluster_wide",
+  "target_selector": {
+    "node_ids": ["optional_node_id"],
+    "labels": { "role": "worker", "region": "us-east-1" },
+    "zones": ["optional_zone"],
+    "version_constraints": {
+      "node_agent_semver": ">=1.0.0",
+      "runtime_semver": ">=1.0.0"
+    }
+  },
+  "mutation_type": "define_function | redefine_function | undefine_function | define_dependency | undefine_dependency | define_constant | undefine_constant | define_database_connection | undefine_database_connection | shared_create_chunk | shared_free_chunk | shared_reconfigure_limits | shared_clear_all_chunks",
+  "payload": {},
+  "expected_version": {
+    "entity_name": "optional_name",
+    "entity_version": "optional_etag_or_hash",
+    "compare_mode": "exact | at_least"
+  },
+  "dry_run": false,
+  "rollout_strategy": {
+    "mode": "all_at_once | rolling_percent | canary_then_expand | single_node",
+    "min_success_percent": 100,
+    "batch_percent": 10,
+    "canary_node_count": 1,
+    "inter_batch_delay_ms": 1000,
+    "apply_timeout_ms": 30000,
+    "verify_timeout_ms": 30000,
+    "rollback_policy": {
+      "auto_rollback": true,
+      "rollback_on_partial_failure": true,
+      "rollback_on_verification_failure": true
+    }
+  },
+  "in_flight_policy": "no_interruption | drain_and_swap",
+  "change_context": {
+    "reason": "required string",
+    "change_ticket_id": "required string in production",
+    "requested_by": "actor identifier",
+    "dual_authorization": {
+      "required": false,
+      "approver_subject": "optional second approver"
+    }
+  },
+  "artifact": {
+    "source_hash_sha256": "optional hash",
+    "signature": "optional detached signature",
+    "signature_key_id": "optional key id"
+  },
+  "auth_context": {
+    "subject": "string",
+    "tenant_id": "string",
+    "environment": "dev | staging | prod",
+    "capability_claims": [
+      "rpc.admin.mutate:function:redefine",
+      "rpc.read.cluster:*"
+    ],
+    "signed_claims": "opaque string"
+  },
+  "idempotency_key": "optional string"
+}
+```
+
+Validation rules:
+
+1. `mutation_id`, `request_id`, `trace_id`, and `deadline_unix_ms` are `REQUIRED`.
+2. `mutation_id` `MUST` be globally unique within the dedupe window.
+3. `target_scope=single_node` `MUST` specify exactly one node id.
+4. `target_scope=node_selector` `MUST` provide at least one selector predicate.
+5. `target_scope=cluster_wide` `MUST NOT` provide explicit node ids.
+6. `dry_run=true` `MUST NOT` mutate state.
+7. `redefine_function` in production `MUST` include signed artifact metadata unless explicitly disabled by policy.
+8. Production mutations `MUST` include `change_context.reason` and `change_context.change_ticket_id`.
+
+### 14.3.2 `cluster_admin_mutation_ack`
+
+```json
+{
+  "protocol_version": 1,
+  "message_type": "cluster_admin_mutation_ack",
+  "timestamp_unix_ms": 0,
+  "mutation_id": "mut_...",
+  "request_id": "req_...",
+  "accepted": true,
+  "planner_id": "gateway_or_controller_id",
+  "target_node_count": 0,
+  "dry_run": false
+}
+```
+
+### 14.3.3 `cluster_admin_mutation_result`
+
+```json
+{
+  "protocol_version": 1,
+  "message_type": "cluster_admin_mutation_result",
+  "timestamp_unix_ms": 0,
+  "mutation_id": "mut_...",
+  "request_id": "req_...",
+  "status": "completed | partially_failed | rolled_back | dry_run_completed",
+  "rollout_strategy": "all_at_once | rolling_percent | canary_then_expand | single_node",
+  "summary": {
+    "target_node_count": 0,
+    "applied_node_count": 0,
+    "failed_node_count": 0,
+    "rolled_back_node_count": 0,
+    "min_success_percent": 100,
+    "achieved_success_percent": 100
+  },
+  "per_node_results": [
+    {
+      "node_id": "node_...",
+      "status": "applied | failed | rolled_back | skipped",
+      "error_code": "optional error code",
+      "error_message": "optional error message",
+      "applied_version": "optional hash/version"
+    }
+  ],
+  "timing": {
+    "planning_started_unix_ms": 0,
+    "apply_started_unix_ms": 0,
+    "verify_finished_unix_ms": 0
+  },
+  "audit_record_id": "immutable_audit_id"
+}
+```
+
+### 14.3.4 `cluster_admin_mutation_error`
+
+```json
+{
+  "protocol_version": 1,
+  "message_type": "cluster_admin_mutation_error",
+  "timestamp_unix_ms": 0,
+  "mutation_id": "mut_...",
+  "request_id": "req_...",
+  "error": {
+    "code": "ADMIN_AUTH_FAILED | ADMIN_FORBIDDEN | ADMIN_VALIDATION_FAILED | ADMIN_TARGET_EMPTY | ADMIN_CONFLICT | ADMIN_DISPATCH_RETRYABLE | ADMIN_TIMEOUT | ADMIN_PARTIAL_FAILURE | ADMIN_ROLLBACK_FAILED | ADMIN_INTERNAL",
+    "message": "string",
+    "retryable": false,
+    "unknown_outcome": false,
+    "details": {}
+  }
+}
+```
+
+## 14.4 Rollout and Consistency Semantics
+
+### 14.4.1 Rollout strategies
+
+1. `all_at_once`: dispatch to all selected nodes concurrently.
+2. `rolling_percent`: mutate in batches (`batch_percent`) with verification gates between batches.
+3. `canary_then_expand`: mutate canary subset first, verify, then expand in one or more waves.
+4. `single_node`: mutate one node only; intended for targeted testing or break-glass.
+
+### 14.4.2 Success criteria and timeout behavior
+
+1. Mutations `MUST` evaluate `min_success_percent` against final eligible target set.
+2. Apply timeout and verify timeout are independently enforced.
+3. If timeout occurs before threshold is met, status `MUST` be `partially_failed` or `failed` based on achieved success.
+4. `dry_run` `MUST` return resolved targets and policy decisions without applying changes.
+
+### 14.4.3 Partial failure and rollback
+
+1. Rollback policy `MAY` be automatic or manual.
+2. If auto-rollback is enabled and rollback trigger condition is met, rollback `MUST` be attempted on successfully mutated nodes.
+3. Rollback attempts and outcomes `MUST` be immutably audited.
+4. If rollback fails on any node, final status `MUST` be `rolled_back` with failure details or `ADMIN_ROLLBACK_FAILED`.
+
+### 14.4.4 In-flight call handling
+
+1. `no_interruption`: in-flight calls continue on old definition; new calls use updated definition once node apply is complete.
+2. `drain_and_swap`: node drains eligible in-flight calls before swapping definitions.
+3. If `function_hash_sha1` is pinned on call envelopes, nodes `MUST` honor pinning or reject with explicit version mismatch.
+
+## 14.5 Granular Privilege Model (RBAC + ABAC)
+
+### 14.5.1 Capability namespaces
+
+Required namespace examples:
+
+1. `rpc.call:*`
+2. `rpc.call:function:<name>`
+3. `rpc.admin.mutate:*`
+4. `rpc.admin.mutate:function:define`
+5. `rpc.admin.mutate:function:redefine`
+6. `rpc.admin.mutate:function:undefine`
+7. `rpc.admin.mutate:dependency:define`
+8. `rpc.admin.mutate:dependency:undefine`
+9. `rpc.admin.mutate:constant:define`
+10. `rpc.admin.mutate:constant:undefine`
+11. `rpc.admin.mutate:database_connection:define`
+12. `rpc.admin.mutate:database_connection:undefine`
+13. `rpc.admin.mutate:shared:*` (optional deployment feature)
+14. `rpc.read.cluster:*`
+15. `rpc.read.debug:*`
+
+### 14.5.2 ABAC scope dimensions
+
+Policy evaluation `MUST` support constraints on:
+
+1. tenant
+2. environment
+3. cluster id
+4. node selector (labels, zone, explicit node id)
+5. function name exact match and pattern match
+6. mutation type
+
+### 14.5.3 Evaluation precedence
+
+1. `deny` rules `MUST` override `allow` rules.
+2. Unmatched requests `MUST` default deny.
+3. Least-privilege policy is the default posture.
+4. Call execution permissions and mutation permissions `MUST` be evaluated independently.
+
+### 14.5.4 Concrete policy examples
+
+#### Example A: Full administrator
+
+```json
+{
+  "policy_id": "full_admin_prod",
+  "effect": "allow",
+  "subject_match": { "group": "cluster-admins" },
+  "capabilities": ["rpc.call:*", "rpc.admin.mutate:*", "rpc.read.cluster:*", "rpc.read.debug:*"],
+  "constraints": {
+    "tenant": "*",
+    "environment": ["staging", "prod"],
+    "cluster": "*"
+  }
+}
+```
+
+#### Example B: Function-limited mutation admin
+
+```json
+{
+  "policy_id": "billing_function_admin",
+  "effect": "allow",
+  "subject_match": { "service_account": "svc_billing_release" },
+  "capabilities": [
+    "rpc.call:function:BillingCharge",
+    "rpc.admin.mutate:function:define",
+    "rpc.admin.mutate:function:redefine",
+    "rpc.admin.mutate:function:undefine",
+    "rpc.read.cluster:*"
+  ],
+  "constraints": {
+    "tenant": "billing",
+    "environment": ["staging"],
+    "function_name_pattern": "^Billing.*$",
+    "target_selector_labels": { "service": "billing" }
+  }
+}
+```
+
+#### Example C: Call-only client
+
+```json
+{
+  "policy_id": "call_only_client",
+  "effect": "allow",
+  "subject_match": { "client_id": "client_portal_backend" },
+  "capabilities": ["rpc.call:function:GetUserProfile"],
+  "constraints": {
+    "tenant": "customer_portal",
+    "environment": ["prod"]
+  }
+}
+```
+
+## 14.6 Security Hardening Requirements
+
+1. Administrative mutation requests `MUST` require mTLS and signed identity tokens.
+2. Credentials used for mutation operations `MUST` be short-lived.
+3. Replay protection `MUST` include nonce or dedupe protections keyed by `mutation_id`.
+4. Mutation requests in production `MUST` include change reason and ticket metadata.
+5. Production deployments `SHOULD` support optional dual-authorization (two-person approval).
+6. Function redefinitions in production `MUST` support signed artifact/hash verification unless policy explicitly disables this for specific environments.
+7. Authorization enforcement `MUST` occur server-side; client-side checks are advisory only.
+
+## 14.7 Auditability and Observability
+
+### 14.7.1 Immutable audit record requirements
+
+Each mutation `MUST` emit immutable audit records containing:
+
+1. actor identity
+2. evaluated privileges and decision path
+3. payload hash
+4. target scope and resolved node set
+5. per-node result
+6. timestamps for authorize/plan/apply/verify
+7. rollback trigger and rollback result
+
+### 14.7.2 Event taxonomy
+
+Required event names:
+
+1. `admin_mutation_requested`
+2. `admin_mutation_authorized`
+3. `admin_mutation_applied`
+4. `admin_mutation_partially_failed`
+5. `admin_mutation_rolled_back`
+6. `admin_mutation_denied`
+
+### 14.7.3 Required metrics
+
+1. `admin_mutation_requests_total`
+2. `admin_mutation_success_total`
+3. `admin_mutation_failure_total`
+4. `admin_mutation_rollout_duration_ms` histogram
+5. `admin_mutation_rollback_total`
+6. `admin_mutation_authz_denied_total` (labeled by deny reason)
+
+## 14.8 Mutation Failure Semantics and Retry Matrix
+
+### 14.8.1 Idempotency and dedupe
+
+1. `mutation_id` is `REQUIRED` for all mutation requests.
+2. Gateway/controller `MUST` dedupe repeated submissions by `mutation_id` within a configured retention window.
+3. Exactly-once mutation application is not guaranteed in distributed failure scenarios.
+4. Implementations `MUST` provide at-least-once-safe behavior through dedupe and CAS (`expected_version`) checks.
+
+### 14.8.2 Mutation retry matrix
+
+| Error code | Retryable | Unknown outcome | Gateway/controller default action | Caller guidance |
+|---|---:|---:|---|---|
+| `ADMIN_AUTH_FAILED` | No | No | Reject terminal | Fix auth |
+| `ADMIN_FORBIDDEN` | No | No | Reject terminal | Fix role/policy |
+| `ADMIN_VALIDATION_FAILED` | No | No | Reject terminal | Fix payload/schema |
+| `ADMIN_TARGET_EMPTY` | No | No | Reject terminal | Fix selector |
+| `ADMIN_CONFLICT` | Conditional | No | Retry only with updated CAS/version | Refresh version and retry |
+| `ADMIN_DISPATCH_RETRYABLE` | Yes | Possible | Retry bounded by deadline | Safe with same `mutation_id` |
+| `ADMIN_TIMEOUT` | Conditional | Yes | Retry status query; optional retry apply with same id | Check audit trail first |
+| `ADMIN_PARTIAL_FAILURE` | Conditional | No | Execute rollback policy or return partial | Decide manual rollback/retry |
+| `ADMIN_ROLLBACK_FAILED` | No | Possible | Raise critical alert | Manual remediation |
+| `ADMIN_INTERNAL` | Yes | Possible | Retry bounded | Investigate if repeated |
+
+## 14.9 Mutation State Machines
+
+### 14.9.1 Administrative mutation lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Received
+    Received --> Denied: authz/authn failed
+    Received --> Authorized
+    Authorized --> Planning
+    Planning --> Dispatching
+    Dispatching --> Applying
+    Applying --> Verifying
+    Verifying --> Completed: success_threshold_met
+    Verifying --> PartialFailed: partial_threshold_or_timeout
+    PartialFailed --> RolledBack: auto_or_manual_rollback_success
+    PartialFailed --> Failed: rollback_not_enabled_or_failed
+    Dispatching --> Failed: dispatch_failure
+    Applying --> Failed: apply_failure
+    Verifying --> Failed: verification_failure_no_rollback
+    Received --> Failed: validation_failed
+    Authorized --> Failed: deadline_exceeded
+    Planning --> Cancelled: cancellation_requested
+    Dispatching --> Cancelled: cancellation_requested
+    Applying --> Cancelled: cancellation_requested
+    Verifying --> Cancelled: cancellation_requested
+    Completed --> [*]
+    RolledBack --> [*]
+    Failed --> [*]
+    Denied --> [*]
+    Cancelled --> [*]
+```
+
+### 14.9.2 Per-node mutation apply lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending
+    Pending --> Validate
+    Validate --> Failed: validation_failed
+    Validate --> Apply
+    Apply --> Confirm
+    Confirm --> Success
+    Confirm --> Failed: confirm_failed
+    Apply --> Failed: apply_failed
+    Pending --> Cancelled: cancellation_requested
+    Validate --> Cancelled: timeout_or_cancel
+    Apply --> Cancelled: timeout_or_cancel
+    Confirm --> Cancelled: timeout_or_cancel
+    Success --> [*]
+    Failed --> [*]
+    Cancelled --> [*]
+```
+
+## 14.10 Rollout Examples (Normative Scenarios)
+
+### 14.10.1 Canary success then expand
+
+1. Submit `redefine_function` with `rollout_strategy.mode=canary_then_expand`.
+2. `canary_node_count=2`, `min_success_percent=100` for canary stage.
+3. Verification passes on canary nodes.
+4. Controller expands using `rolling_percent` batches.
+5. Final result `completed`, no rollback required.
+
+### 14.10.2 Canary failure with rollback
+
+1. Submit `redefine_function` with `auto_rollback=true`.
+2. Canary stage fails verification on one canary node.
+3. Controller halts expansion and triggers rollback on all mutated nodes.
+4. Final result `rolled_back`.
+5. Audit trail contains rollback trigger and per-node rollback status.
+
+## 14.11 End-to-End Mutation Example
+
+### 14.11.1 Request
+
+```json
+{
+  "protocol_version": 1,
+  "message_type": "cluster_admin_mutation_request",
+  "timestamp_unix_ms": 1761700000000,
+  "mutation_id": "mut_20260228_0001",
+  "request_id": "req_admin_0001",
+  "trace_id": "trace_admin_abc",
+  "deadline_unix_ms": 1761700030000,
+  "target_scope": "node_selector",
+  "target_selector": {
+    "labels": { "service": "payments", "environment": "staging" }
+  },
+  "mutation_type": "redefine_function",
+  "payload": {
+    "name": "ChargeCard",
+    "worker_func_source": "async function ChargeCard(...) { /* redacted */ }"
+  },
+  "expected_version": {
+    "entity_name": "ChargeCard",
+    "entity_version": "sha1_prev_version",
+    "compare_mode": "exact"
+  },
+  "dry_run": false,
+  "rollout_strategy": {
+    "mode": "canary_then_expand",
+    "canary_node_count": 1,
+    "min_success_percent": 100,
+    "apply_timeout_ms": 30000,
+    "verify_timeout_ms": 30000,
+    "rollback_policy": {
+      "auto_rollback": true,
+      "rollback_on_partial_failure": true,
+      "rollback_on_verification_failure": true
+    }
+  },
+  "in_flight_policy": "drain_and_swap",
+  "change_context": {
+    "reason": "Fix AVS mismatch handling",
+    "change_ticket_id": "CHG-48219",
+    "requested_by": "alice@example.com"
+  },
+  "artifact": {
+    "source_hash_sha256": "sha256_...",
+    "signature": "sig_...",
+    "signature_key_id": "key_prod_2026_01"
+  },
+  "auth_context": {
+    "subject": "alice@example.com",
+    "tenant_id": "payments",
+    "environment": "staging",
+    "capability_claims": ["rpc.admin.mutate:function:redefine", "rpc.read.cluster:*"],
+    "signed_claims": "jwt_or_detached_claim_blob"
+  }
+}
+```
+
+### 14.11.2 Result
+
+```json
+{
+  "protocol_version": 1,
+  "message_type": "cluster_admin_mutation_result",
+  "timestamp_unix_ms": 1761700012000,
+  "mutation_id": "mut_20260228_0001",
+  "request_id": "req_admin_0001",
+  "status": "completed",
+  "rollout_strategy": "canary_then_expand",
+  "summary": {
+    "target_node_count": 10,
+    "applied_node_count": 10,
+    "failed_node_count": 0,
+    "rolled_back_node_count": 0,
+    "min_success_percent": 100,
+    "achieved_success_percent": 100
+  },
+  "per_node_results": [
+    { "node_id": "node_a", "status": "applied", "applied_version": "sha1_new_version" },
+    { "node_id": "node_b", "status": "applied", "applied_version": "sha1_new_version" }
+  ],
+  "audit_record_id": "audit_mut_20260228_0001"
+}
+```
+
+## 14.12 Backward Compatibility for Mutation Plane
+
+1. This section is additive and does not change existing call execution APIs.
+2. Mutation plane messages are optional for clients that only use call execution.
+3. Gateways and node agents `SHOULD` advertise mutation-plane support in capability metadata.
+4. Mutation-plane breaking changes require protocol major version increment.
+
+## 14.13 Change Management and Governance
+
+### 14.13.1 Staged rollout recommendation
+
+1. Dev: permissive policy, dry-run required for first application.
+2. Staging: canary-then-expand with automatic rollback.
+3. Production: dual-authorization for high-risk mutations, mandatory change ticket, strict signed artifacts.
+
+### 14.13.2 Production safety checklist
+
+1. Validate auth policy for actor and target scope.
+2. Confirm `expected_version` CAS token.
+3. Confirm rollback policy and rollback feasibility.
+4. Confirm observability sinks and audit sink are healthy.
+5. Confirm deadline and timeout budgets are realistic.
+6. Run optional dry-run before apply.
+
+### 14.13.3 Break-glass procedure
+
+1. Break-glass access `MUST` be strongly scoped and time-limited.
+2. Break-glass mutations `MUST` emit high-severity audit events.
+3. Break-glass use `MUST` require post-incident review and credential rotation.
+
+## 15. Backward Compatibility and Evolution
 
 1. New optional fields are backward compatible.
 2. Required field additions require protocol version bump.
 3. Gateway and node versions `SHOULD` be rolled with overlap windows.
 4. Function hash pinning `SHOULD` be used during phased rollouts.
 
-## 15. Reference Defaults (v1)
+## 16. Reference Defaults (v1)
 
 1. `max_attempts = 2`
 2. Gateway retry backoff: full jitter in `[10ms, 250ms]`
@@ -523,13 +1111,13 @@ Each event `MUST` include:
 5. Heartbeat interval: 3s
 6. Heartbeat TTL: 9s
 
-## 16. Open Implementation Decisions
+## 17. Open Implementation Decisions
 
 1. Whether gateway retries are always internal, or optionally delegated to client SDK.
 2. Whether progress streaming is needed in protocol v1 (`cluster_call_progress` message type).
 3. Whether binary payload transport is included in v1 or deferred to v2.
 
-## 17. Implementation Checklist
+## 18. Implementation Checklist
 
 1. Define protocol validation for all message types.
 2. Implement gateway retry engine with deadline-aware budget.
@@ -538,7 +1126,7 @@ Each event `MUST` include:
 5. Integrate observability event emission and metric tags.
 6. Add conformance tests for retry matrix and state transitions.
 
-## 18. Appendix A: Canonical Error Object
+## 19. Appendix A: Canonical Error Object
 
 ```json
 {
@@ -555,7 +1143,7 @@ Each event `MUST` include:
 }
 ```
 
-## 19. Appendix B: Canonical Result Object
+## 20. Appendix B: Canonical Result Object
 
 ```json
 {
@@ -568,3 +1156,58 @@ Each event `MUST` include:
   "return_value": {}
 }
 ```
+
+## 21. Operations Readiness (Phase 13)
+
+## 21.1 Required Operability Artifacts
+
+Implementations MUST maintain and publish:
+
+1. observability mapping for call, mutation, routing, and transport layers,
+2. alert definitions with threshold and ownership metadata,
+3. incident runbooks for triage, rollback, break-glass, and key/cert rotation,
+4. staged deployment readiness checklist with promotion gates,
+5. repeatable chaos/stress validation scenarios and pass/fail criteria.
+
+## 21.2 Required Correlation Fields
+
+Operational telemetry MUST include correlation keys where available:
+
+1. `trace_id`
+2. `request_id`
+3. `mutation_id`
+4. `node_id`
+5. `timestamp_unix_ms`
+
+## 21.3 Required Alert Classes
+
+At minimum, operators MUST define alerts for:
+
+1. mutation failure spikes,
+2. authorization-denial anomalies,
+3. timeout/retry storms,
+4. rollback frequency anomalies,
+5. node health degradation and unhealthy-node routing growth.
+
+## 21.4 Chaos/Stress Validation Matrix
+
+The release process MUST validate all scenarios below:
+
+1. node crash during active load,
+2. network partition simulation,
+3. transport reconnect storms,
+4. mutation rollout during degraded cluster.
+
+Pass criteria:
+
+1. deterministic terminal outcomes,
+2. bounded retry/timeout behavior,
+3. observable lifecycle and transport telemetry,
+4. no lingering session/request/resource leaks.
+
+## 21.5 Operational Documentation References
+
+The implementation-maintained references are:
+
+1. `design_documentation/Operations_Runbook_Phase13.md`
+2. `design_documentation/Operations_Readiness_Checklist_Phase13.md`
