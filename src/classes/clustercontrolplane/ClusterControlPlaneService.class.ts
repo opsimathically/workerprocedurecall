@@ -1,11 +1,17 @@
 import {
-  createServer,
+  createSecureServer,
+  type Http2SecureServer,
   type Http2Server,
   type Http2ServerRequest,
   type Http2ServerResponse,
   type IncomingHttpHeaders
 } from 'node:http2';
 import { createHash } from 'node:crypto';
+import {
+  BuildTlsServerOptions,
+  ValidateTlsServerConfig,
+  type cluster_tls_server_config_t
+} from '../clustertransport/ClusterTlsSecurity.class';
 
 import type {
   cluster_control_plane_event_t,
@@ -65,6 +71,9 @@ export type cluster_control_plane_service_constructor_params_t = {
   gateway_default_lease_ttl_ms?: number;
   gateway_expiration_check_interval_ms?: number;
   retention_policy?: Partial<cluster_control_plane_state_retention_policy_t>;
+  security?: {
+    tls?: cluster_tls_server_config_t;
+  };
 };
 
 export type cluster_control_plane_service_address_t = {
@@ -175,8 +184,9 @@ export class ClusterControlPlaneService {
 
   private host: string;
   private port: number;
+  private readonly tls_server_config: cluster_tls_server_config_t;
 
-  private http2_server: Http2Server | null = null;
+  private http2_server: Http2SecureServer | null = null;
   private gateway_expiration_interval_handle: NodeJS.Timeout | null = null;
 
   private gateway_default_lease_ttl_ms: number;
@@ -209,6 +219,9 @@ export class ClusterControlPlaneService {
   constructor(params: cluster_control_plane_service_constructor_params_t = {}) {
     this.host = params.host ?? '127.0.0.1';
     this.port = params.port ?? 0;
+    this.tls_server_config = ValidateTlsServerConfig({
+      tls_server_config: params.security?.tls
+    });
     this.request_path = BuildRequestPath({
       request_path: params.request_path
     });
@@ -239,7 +252,11 @@ export class ClusterControlPlaneService {
     this.host = params.host ?? this.host;
     this.port = params.port ?? this.port;
 
-    this.http2_server = createServer();
+    this.http2_server = createSecureServer(
+      BuildTlsServerOptions({
+        tls_server_config: this.tls_server_config
+      })
+    );
     this.http2_server.on('request', (request, response): void => {
       void this.handleHttpRequest({ request, response });
     });

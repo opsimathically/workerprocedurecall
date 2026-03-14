@@ -5,6 +5,7 @@ import {
   ClusterClientError,
   type cluster_client_error_code_t
 } from '../../src/index';
+import { BuildSecureClientTlsConfig } from '../fixtures/secure_transport_config';
 
 async function AssertClusterClientCallGenericTypingWorks(params: {
   cluster_client: ClusterClient;
@@ -57,7 +58,8 @@ test('cluster client typing assertions compile', function () {
       tenant_id: 'typing_tenant',
       scopes: ['rpc.call:*'],
       signed_claims: 'typing_signed_claims'
-    }
+    },
+    transport_security: BuildSecureClientTlsConfig()
   });
 
   void cluster_client;

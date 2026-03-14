@@ -1,10 +1,17 @@
 import {
-  createServer,
+  createSecureServer,
+  type Http2SecureServer,
   type Http2Server,
   type Http2ServerRequest,
   type Http2ServerResponse,
   type IncomingHttpHeaders
 } from 'node:http2';
+import {
+  BuildTlsServerOptions,
+  ValidateTlsServerConfig,
+  type cluster_tls_client_config_t,
+  type cluster_tls_server_config_t
+} from '../clustertransport/ClusterTlsSecurity.class';
 
 import type { cluster_call_request_message_i } from '../clusterprotocol/ClusterProtocolTypes';
 import {
@@ -98,6 +105,10 @@ export type cluster_ingress_balancer_service_constructor_params_t = {
   authorize_call_request?: cluster_ingress_balancer_authorize_call_request_t;
   forward_request_headers?: Record<string, string>;
   forward_request_headers_provider?: cluster_ingress_forwarder_auth_headers_provider_t;
+  transport_security?: cluster_tls_client_config_t;
+  security?: {
+    tls?: cluster_tls_server_config_t;
+  };
   geo_ingress?: {
     enabled?: boolean;
     role?: 'global' | 'regional';
@@ -119,6 +130,7 @@ export type cluster_ingress_balancer_service_constructor_params_t = {
     region_capacity_score?: number;
     region_latency_slo_ms?: number;
     region_latency_ewma_ms?: number;
+    transport_security?: cluster_tls_client_config_t;
   };
 };
 
@@ -282,10 +294,11 @@ export class ClusterIngressBalancerService {
   private readonly geo_ingress_region_latency_slo_ms: number | undefined;
   private readonly geo_ingress_region_latency_ewma_ms: number | undefined;
   private readonly geo_ingress_adapter: ClusterGeoIngressAdapter | null;
+  private readonly tls_server_config: cluster_tls_server_config_t;
   private geo_ingress_last_sync_error_message: string | null = null;
   private geo_ingress_sync_interval_handle: NodeJS.Timeout | null = null;
 
-  private http2_server: Http2Server | null = null;
+  private http2_server: Http2SecureServer | null = null;
 
   private metrics: ingress_balancer_metrics_t = BuildDefaultMetrics();
   private recent_event_list: ingress_balancer_event_t[] = [];
@@ -307,6 +320,9 @@ export class ClusterIngressBalancerService {
     });
     this.routing_mode = params.routing_mode ?? 'least_loaded';
     this.max_attempts = params.max_attempts ?? 3;
+    this.tls_server_config = ValidateTlsServerConfig({
+      tls_server_config: params.security?.tls
+    });
 
     this.geo_ingress_enabled = params.geo_ingress?.enabled === true;
     this.geo_ingress_role = params.geo_ingress?.role ?? 'global';
@@ -352,7 +368,8 @@ export class ClusterIngressBalancerService {
         retry_base_delay_ms: params.geo_ingress.retry_base_delay_ms,
         retry_max_delay_ms: params.geo_ingress.retry_max_delay_ms,
         endpoint_cooldown_ms: params.geo_ingress.endpoint_cooldown_ms,
-        max_request_attempts: params.geo_ingress.max_request_attempts
+        max_request_attempts: params.geo_ingress.max_request_attempts,
+        transport_security: params.geo_ingress.transport_security ?? params.transport_security
       });
     } else if (
       params.geo_ingress?.enabled === true &&
@@ -367,7 +384,8 @@ export class ClusterIngressBalancerService {
         retry_base_delay_ms: params.geo_ingress.retry_base_delay_ms,
         retry_max_delay_ms: params.geo_ingress.retry_max_delay_ms,
         endpoint_cooldown_ms: params.geo_ingress.endpoint_cooldown_ms,
-        max_request_attempts: params.geo_ingress.max_request_attempts
+        max_request_attempts: params.geo_ingress.max_request_attempts,
+        transport_security: params.geo_ingress.transport_security ?? params.transport_security
       });
     } else {
       this.geo_ingress_adapter = null;
@@ -375,6 +393,20 @@ export class ClusterIngressBalancerService {
 
     const resolved_target_resolver_config: cluster_ingress_target_resolver_constructor_params_t = {
       ...(params.target_resolver_config ?? {})
+    };
+
+    resolved_target_resolver_config.control_plane = {
+      ...(params.target_resolver_config?.control_plane ?? {}),
+      transport_security:
+        params.target_resolver_config?.control_plane?.transport_security ??
+        params.transport_security
+    };
+
+    resolved_target_resolver_config.discovery = {
+      ...(params.target_resolver_config?.discovery ?? {}),
+      transport_security:
+        params.target_resolver_config?.discovery?.transport_security ??
+        params.transport_security
     };
 
     if (this.geo_ingress_enabled) {
@@ -420,7 +452,11 @@ export class ClusterIngressBalancerService {
           params.geo_ingress?.endpoint_cooldown_ms,
         max_request_attempts:
           params.target_resolver_config?.geo_control_plane?.max_request_attempts ??
-          params.geo_ingress?.max_request_attempts
+          params.geo_ingress?.max_request_attempts,
+        transport_security:
+          params.target_resolver_config?.geo_control_plane?.transport_security ??
+          params.geo_ingress?.transport_security ??
+          params.transport_security
       };
     }
 
@@ -447,7 +483,8 @@ export class ClusterIngressBalancerService {
     this.forwarder = new ClusterIngressForwarder({
       request_timeout_ms: params.request_timeout_ms,
       static_request_headers: params.forward_request_headers,
-      auth_headers_provider: params.forward_request_headers_provider
+      auth_headers_provider: params.forward_request_headers_provider,
+      transport_security: params.transport_security
     });
 
     this.authenticate_request = params.authenticate_request;
@@ -474,7 +511,11 @@ export class ClusterIngressBalancerService {
       // service can start before initial target convergence.
     });
 
-    this.http2_server = createServer();
+    this.http2_server = createSecureServer(
+      BuildTlsServerOptions({
+        tls_server_config: this.tls_server_config
+      })
+    );
     this.http2_server.on('request', (request, response): void => {
       void this.handleHttpRequest({ request, response });
     });
@@ -1263,7 +1304,7 @@ export class ClusterIngressBalancerService {
         host: address.host,
         port: address.port,
         request_path: address.request_path,
-        tls_mode: 'disabled'
+        tls_mode: 'required'
       },
       health_status: this.resolveGeoIngressHealthStatus(),
       ingress_version: 'phase19',

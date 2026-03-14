@@ -130,7 +130,9 @@ async function AssertNameSpecificHandleOverrideWorks(): Promise<void> {
 }
 
 async function AssertDependencyAliasInferenceWorks(): Promise<void> {
-  const path_module = await wpc_import('path_dep_typed');
+  const path_module = await wpc_import<typeof import('node:path')>({
+    alias: 'path_dep_typed'
+  });
   path_module.basename('/tmp/path_dep_typed.txt');
 }
 
@@ -147,7 +149,9 @@ async function AssertDependencyGenericLookupWorksWithoutMapping(): Promise<void>
 }
 
 async function AssertDependencyInvalidMethodFailsTypeCheck(): Promise<void> {
-  const path_module = await wpc_import('path_dep_typed');
+  const path_module = await wpc_import<typeof import('node:path')>({
+    alias: 'path_dep_typed'
+  });
   // @ts-expect-error path module does not include this method.
   path_module.method_that_does_not_exist();
 }

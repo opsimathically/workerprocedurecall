@@ -8,6 +8,10 @@ import {
   ClusterNodeAgent,
   WorkerProcedureCall
 } from '../../src/index';
+import {
+  BuildSecureClientTlsConfig,
+  BuildSecureNodeTransportSecurity
+} from '../fixtures/secure_transport_config';
 
 function ReadAuthorizationHeader(params: {
   authorization_header_value: string | string[] | undefined;
@@ -79,6 +83,7 @@ test('cluster client executes successful network call', async function () {
     node_id: 'phase9_success_node',
     worker_start_count: 1,
     transport: {
+      security: BuildSecureNodeTransportSecurity(),
       authenticate_request: function (params) {
         const authorization_header = ReadAuthorizationHeader({
           authorization_header_value: params.headers.authorization
@@ -130,7 +135,8 @@ test('cluster client executes successful network call', async function () {
       },
       auth_headers: {
         authorization: 'Bearer phase9_token'
-      }
+      },
+      transport_security: BuildSecureClientTlsConfig()
     });
 
     try {
@@ -158,6 +164,7 @@ test('cluster client maps auth failure to deterministic protocol error', async f
     node_id: 'phase9_auth_node',
     worker_start_count: 1,
     transport: {
+      security: BuildSecureNodeTransportSecurity(),
       authenticate_request: function (params) {
         const authorization_header = ReadAuthorizationHeader({
           authorization_header_value: params.headers.authorization
@@ -212,7 +219,8 @@ test('cluster client maps auth failure to deterministic protocol error', async f
       },
       retry_policy: {
         max_attempts: 1
-      }
+      },
+      transport_security: BuildSecureClientTlsConfig()
     });
 
     try {
@@ -246,6 +254,7 @@ test('cluster client enforces timeout deadline deterministically', async functio
     node_id: 'phase9_timeout_node',
     worker_start_count: 1,
     transport: {
+      security: BuildSecureNodeTransportSecurity(),
       authenticate_request: function () {
         return {
           ok: true,
@@ -290,7 +299,8 @@ test('cluster client enforces timeout deadline deterministically', async functio
       },
       retry_policy: {
         max_attempts: 1
-      }
+      },
+      transport_security: BuildSecureClientTlsConfig()
     });
 
     try {
@@ -328,6 +338,7 @@ test('cluster client reconnects and continues calling after server restart', asy
     worker_start_count: 1,
     transport: {
       port,
+      security: BuildSecureNodeTransportSecurity(),
       authenticate_request: function () {
         return {
           ok: true,
@@ -370,7 +381,8 @@ test('cluster client reconnects and continues calling after server restart', asy
         enabled: true,
         max_attempts: 10,
         backoff_ms: 50
-      }
+      },
+      transport_security: BuildSecureClientTlsConfig()
     });
 
     try {
@@ -408,6 +420,7 @@ test('cluster client retries retryable transport failures and succeeds once serv
     worker_start_count: 1,
     transport: {
       port,
+      security: BuildSecureNodeTransportSecurity(),
       authenticate_request: function () {
         return {
           ok: true,
@@ -466,7 +479,8 @@ test('cluster client retries retryable transport failures and succeeds once serv
         enabled: true,
         max_attempts: 1,
         backoff_ms: 20
-      }
+      },
+      transport_security: BuildSecureClientTlsConfig()
     });
 
     try {

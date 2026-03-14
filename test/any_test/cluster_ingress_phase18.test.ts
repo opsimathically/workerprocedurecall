@@ -13,6 +13,11 @@ import {
   WorkerProcedureCall,
   type cluster_call_request_message_i
 } from '../../src/index';
+import {
+  BuildSecureClientTlsConfig,
+  BuildSecureNodeTransportSecurity,
+  BuildSecureServerTlsConfig
+} from '../fixtures/secure_transport_config';
 
 function Sleep(params: { delay_ms: number }): Promise<void> {
   return new Promise<void>((resolve): void => {
@@ -117,7 +122,7 @@ test('phase18 routing engine deterministic tie-break and target pinning work', f
         host: '127.0.0.1',
         port: 9002,
         request_path: '/wpc/cluster/protocol',
-        tls_mode: 'disabled' as const
+        tls_mode: 'required' as const
       },
       source: 'static' as const,
       health_state: 'ready' as const,
@@ -136,7 +141,7 @@ test('phase18 routing engine deterministic tie-break and target pinning work', f
         host: '127.0.0.1',
         port: 9001,
         request_path: '/wpc/cluster/protocol',
-        tls_mode: 'disabled' as const
+        tls_mode: 'required' as const
       },
       source: 'static' as const,
       health_state: 'ready' as const,
@@ -181,7 +186,7 @@ test('phase18 resolver filtering honors tenant/zone/capability constraints', asy
           host: '127.0.0.1',
           port: 9101,
           request_path: '/wpc/cluster/protocol',
-          tls_mode: 'disabled'
+          tls_mode: 'required'
         },
         zones: ['zone_1'],
         capability_hash_by_function_name: {
@@ -197,7 +202,7 @@ test('phase18 resolver filtering honors tenant/zone/capability constraints', asy
           host: '127.0.0.1',
           port: 9102,
           request_path: '/wpc/cluster/protocol',
-          tls_mode: 'disabled'
+          tls_mode: 'required'
         },
         zones: ['zone_2'],
         capability_hash_by_function_name: {
@@ -246,6 +251,9 @@ test('phase18 ingress routes client call through static target successfully', as
     workerprocedurecall,
     node_id: 'phase18_node_single',
     worker_start_count: 1,
+    transport: {
+      security: BuildSecureNodeTransportSecurity()
+    },
     discovery: {
       enabled: false
     }
@@ -260,6 +268,10 @@ test('phase18 ingress routes client call through static target successfully', as
     ingress_service = new ClusterIngressBalancerService({
       host: '127.0.0.1',
       port: 0,
+      transport_security: BuildSecureClientTlsConfig(),
+      security: {
+        tls: BuildSecureServerTlsConfig()
+      },
       static_target_list: [
         {
           target_id: 'phase18_node_single',
@@ -282,6 +294,7 @@ test('phase18 ingress routes client call through static target successfully', as
       host: ingress_address.host,
       port: ingress_address.port,
       request_path: ingress_address.request_path,
+      transport_security: BuildSecureClientTlsConfig(),
       auth_context: {
         subject: 'phase18_client',
         tenant_id: 'tenant_1',
@@ -322,6 +335,9 @@ test('phase18 ingress failover retries alternate target when primary target is u
     workerprocedurecall,
     node_id: 'phase18_node_healthy',
     worker_start_count: 1,
+    transport: {
+      security: BuildSecureNodeTransportSecurity()
+    },
     discovery: {
       enabled: false
     }
@@ -337,6 +353,10 @@ test('phase18 ingress failover retries alternate target when primary target is u
       host: '127.0.0.1',
       port: 0,
       max_attempts: 2,
+      transport_security: BuildSecureClientTlsConfig(),
+      security: {
+        tls: BuildSecureServerTlsConfig()
+      },
       static_target_list: [
         {
           target_id: 'phase18_down_target',
@@ -344,7 +364,7 @@ test('phase18 ingress failover retries alternate target when primary target is u
             host: '127.0.0.1',
             port: 65_000,
             request_path: '/wpc/cluster/protocol',
-            tls_mode: 'disabled'
+            tls_mode: 'required'
           }
         },
         {
@@ -364,6 +384,7 @@ test('phase18 ingress failover retries alternate target when primary target is u
       host: ingress_address.host,
       port: ingress_address.port,
       request_path: ingress_address.request_path,
+      transport_security: BuildSecureClientTlsConfig(),
       auth_context: {
         subject: 'phase18_client_failover',
         tenant_id: 'tenant_1',
@@ -416,6 +437,9 @@ test('phase18 ingress honors explicit target pinning and rejects invalid pin', a
     workerprocedurecall: workerprocedurecall_a,
     node_id: 'node_a',
     worker_start_count: 1,
+    transport: {
+      security: BuildSecureNodeTransportSecurity()
+    },
     discovery: {
       enabled: false
     }
@@ -424,6 +448,9 @@ test('phase18 ingress honors explicit target pinning and rejects invalid pin', a
     workerprocedurecall: workerprocedurecall_b,
     node_id: 'node_b',
     worker_start_count: 1,
+    transport: {
+      security: BuildSecureNodeTransportSecurity()
+    },
     discovery: {
       enabled: false
     }
@@ -439,6 +466,10 @@ test('phase18 ingress honors explicit target pinning and rejects invalid pin', a
     ingress_service = new ClusterIngressBalancerService({
       host: '127.0.0.1',
       port: 0,
+      transport_security: BuildSecureClientTlsConfig(),
+      security: {
+        tls: BuildSecureServerTlsConfig()
+      },
       static_target_list: [
         {
           target_id: 'node_a',
@@ -468,6 +499,7 @@ test('phase18 ingress honors explicit target pinning and rejects invalid pin', a
       host: ingress_address.host,
       port: ingress_address.port,
       request_path: ingress_address.request_path,
+      transport_security: BuildSecureClientTlsConfig(),
       auth_context: {
         subject: 'phase18_client_pin',
         tenant_id: 'tenant_1',
@@ -513,8 +545,11 @@ test('phase18 ingress honors explicit target pinning and rejects invalid pin', a
 
 test('phase18 ingress uses control-plane topology updates without restart', async function () {
   const control_plane_service = new ClusterControlPlaneService({
-    host: '127.0.0.1',
-    port: 0
+    host: 'localhost',
+    port: 0,
+    security: {
+      tls: BuildSecureServerTlsConfig()
+    }
   });
 
   const workerprocedurecall_a = new WorkerProcedureCall();
@@ -551,6 +586,9 @@ test('phase18 ingress uses control-plane topology updates without restart', asyn
       workerprocedurecall: workerprocedurecall_a,
       node_id: 'cp_node_a',
       worker_start_count: 1,
+      transport: {
+        security: BuildSecureNodeTransportSecurity()
+      },
       discovery: {
         enabled: false
       },
@@ -560,8 +598,9 @@ test('phase18 ingress uses control-plane topology updates without restart', asyn
           host: control_plane_address.host,
           port: control_plane_address.port,
           request_path: control_plane_address.request_path,
-          tls_mode: 'disabled'
+          tls_mode: 'required'
         },
+        transport_security: BuildSecureClientTlsConfig(),
         sync_interval_ms: 100,
         heartbeat_interval_ms: 100
       }
@@ -571,6 +610,9 @@ test('phase18 ingress uses control-plane topology updates without restart', asyn
       workerprocedurecall: workerprocedurecall_b,
       node_id: 'cp_node_b',
       worker_start_count: 1,
+      transport: {
+        security: BuildSecureNodeTransportSecurity()
+      },
       discovery: {
         enabled: false
       },
@@ -580,8 +622,9 @@ test('phase18 ingress uses control-plane topology updates without restart', asyn
           host: control_plane_address.host,
           port: control_plane_address.port,
           request_path: control_plane_address.request_path,
-          tls_mode: 'disabled'
+          tls_mode: 'required'
         },
+        transport_security: BuildSecureClientTlsConfig(),
         sync_interval_ms: 100,
         heartbeat_interval_ms: 100
       }
@@ -595,13 +638,17 @@ test('phase18 ingress uses control-plane topology updates without restart', asyn
       port: 0,
       target_refresh_interval_ms: 100,
       stale_snapshot_max_age_ms: 5_000,
+      transport_security: BuildSecureClientTlsConfig(),
+      security: {
+        tls: BuildSecureServerTlsConfig()
+      },
       target_resolver_config: {
         control_plane: {
           endpoint: {
             host: control_plane_address.host,
             port: control_plane_address.port,
             request_path: control_plane_address.request_path,
-            tls_mode: 'disabled'
+            tls_mode: 'required'
           }
         },
         refresh_interval_ms: 100,
@@ -614,6 +661,7 @@ test('phase18 ingress uses control-plane topology updates without restart', asyn
       host: ingress_address.host,
       port: ingress_address.port,
       request_path: ingress_address.request_path,
+      transport_security: BuildSecureClientTlsConfig(),
       auth_context: {
         subject: 'phase18_cp_client',
         tenant_id: 'tenant_1',
@@ -662,8 +710,11 @@ test('phase18 ingress uses control-plane topology updates without restart', asyn
 
 test('phase18 ingress degraded mode uses last-known-good snapshot and then fails closed after staleness limit', async function () {
   const control_plane_service = new ClusterControlPlaneService({
-    host: '127.0.0.1',
-    port: 0
+    host: 'localhost',
+    port: 0,
+    security: {
+      tls: BuildSecureServerTlsConfig()
+    }
   });
 
   const workerprocedurecall = new WorkerProcedureCall();
@@ -688,6 +739,9 @@ test('phase18 ingress degraded mode uses last-known-good snapshot and then fails
       workerprocedurecall,
       node_id: 'phase18_degraded_node',
       worker_start_count: 1,
+      transport: {
+        security: BuildSecureNodeTransportSecurity()
+      },
       discovery: {
         enabled: false
       },
@@ -697,8 +751,9 @@ test('phase18 ingress degraded mode uses last-known-good snapshot and then fails
           host: control_plane_address.host,
           port: control_plane_address.port,
           request_path: control_plane_address.request_path,
-          tls_mode: 'disabled'
+          tls_mode: 'required'
         },
+        transport_security: BuildSecureClientTlsConfig(),
         sync_interval_ms: 100,
         heartbeat_interval_ms: 100
       }
@@ -711,13 +766,17 @@ test('phase18 ingress degraded mode uses last-known-good snapshot and then fails
       port: 0,
       target_refresh_interval_ms: 100,
       stale_snapshot_max_age_ms: 500,
+      transport_security: BuildSecureClientTlsConfig(),
+      security: {
+        tls: BuildSecureServerTlsConfig()
+      },
       target_resolver_config: {
         control_plane: {
           endpoint: {
             host: control_plane_address.host,
             port: control_plane_address.port,
             request_path: control_plane_address.request_path,
-            tls_mode: 'disabled'
+            tls_mode: 'required'
           }
         },
         refresh_interval_ms: 100,
@@ -731,6 +790,7 @@ test('phase18 ingress degraded mode uses last-known-good snapshot and then fails
       host: ingress_address.host,
       port: ingress_address.port,
       request_path: ingress_address.request_path,
+      transport_security: BuildSecureClientTlsConfig(),
       auth_context: {
         subject: 'phase18_degraded_client',
         tenant_id: 'tenant_1',

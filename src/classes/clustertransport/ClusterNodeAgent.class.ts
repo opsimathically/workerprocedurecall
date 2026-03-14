@@ -55,6 +55,7 @@ import {
   type cluster_http2_transport_address_t,
   type cluster_http2_transport_event_listener_t
 } from './ClusterHttp2Transport.class';
+import type { cluster_tls_client_config_t } from './ClusterTlsSecurity.class';
 import type {
   cluster_transport_jwt_key_t,
   cluster_transport_token_validation_config_t
@@ -68,7 +69,7 @@ export type cluster_node_agent_discovery_external_daemon_config_t = {
   host?: string;
   port?: number;
   request_path?: string;
-  tls_mode?: 'disabled' | 'required';
+  tls_mode?: 'required';
   endpoint_list?: cluster_remote_service_discovery_endpoint_t[];
   request_timeout_ms?: number;
   synchronization_interval_ms?: number;
@@ -78,6 +79,7 @@ export type cluster_node_agent_discovery_external_daemon_config_t = {
   max_request_attempts?: number;
   auth_headers?: Record<string, string>;
   auth_headers_provider?: cluster_remote_service_discovery_auth_headers_provider_t;
+  transport_security?: cluster_tls_client_config_t;
 };
 
 export type cluster_node_agent_discovery_config_t = {
@@ -136,6 +138,7 @@ export type cluster_node_agent_control_plane_config_t = {
   auth_headers?: Record<string, string>;
   auth_headers_provider?: cluster_control_plane_gateway_adapter_auth_headers_provider_t;
   use_topology_for_routing?: boolean;
+  transport_security?: cluster_tls_client_config_t;
 };
 
 export type cluster_node_agent_control_plane_metrics_t = {
@@ -450,7 +453,10 @@ export class ClusterNodeAgent {
         endpoint_cooldown_ms: external_discovery_daemon_config.endpoint_cooldown_ms,
         max_request_attempts: external_discovery_daemon_config.max_request_attempts,
         auth_headers: external_discovery_daemon_config.auth_headers,
-        auth_headers_provider: external_discovery_daemon_config.auth_headers_provider
+        auth_headers_provider: external_discovery_daemon_config.auth_headers_provider,
+        transport_security:
+          external_discovery_daemon_config.transport_security ??
+          this.cluster_http2_transport.getTlsClientConfig()
       });
     } else {
       this.service_discovery_store = new ClusterInMemoryServiceDiscoveryStore();
@@ -504,7 +510,10 @@ export class ClusterNodeAgent {
         endpoint_cooldown_ms: control_plane?.endpoint_cooldown_ms,
         max_request_attempts: control_plane?.max_request_attempts,
         auth_headers: control_plane?.auth_headers,
-        auth_headers_provider: control_plane?.auth_headers_provider
+        auth_headers_provider: control_plane?.auth_headers_provider,
+        transport_security:
+          control_plane?.transport_security ??
+          this.cluster_http2_transport.getTlsClientConfig()
       });
     }
   }
@@ -1366,15 +1375,21 @@ export class ClusterNodeAgent {
       host: string;
       port: number;
       request_path: string;
-      tls_mode: 'disabled' | 'required' | 'terminated_upstream';
+      tls_mode: 'required';
     };
   }): Promise<handle_cluster_call_response_t> {
     const { request, target_address } = params;
 
-    const scheme = target_address.tls_mode === 'required' ? 'https' : 'http';
-    const authority = `${scheme}://${target_address.host}:${target_address.port}`;
+    if (target_address.tls_mode !== 'required') {
+      throw new Error('Only tls_mode="required" is supported for inter-node dispatch.');
+    }
 
-    const client_session = connect(authority);
+    const authority = `https://${target_address.host}:${target_address.port}`;
+
+    const client_session = connect(
+      authority,
+      this.cluster_http2_transport.getTlsClientConnectOptions()
+    );
     client_session.on('error', (): void => {
       // request_stream handles dispatch errors; this prevents uncaught session errors
       // from surfacing when remote nodes disappear during failover windows.

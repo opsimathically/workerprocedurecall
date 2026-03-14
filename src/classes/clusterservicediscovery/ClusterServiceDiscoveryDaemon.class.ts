@@ -1,5 +1,6 @@
 import {
-  createServer,
+  createSecureServer,
+  type Http2SecureServer,
   type Http2Server,
   type Http2ServerRequest,
   type Http2ServerResponse,
@@ -7,6 +8,15 @@ import {
   connect,
   type ClientHttp2Session
 } from 'node:http2';
+import {
+  BuildHttpsAuthority,
+  BuildTlsClientConnectOptions,
+  BuildTlsServerOptions,
+  ValidateTlsClientConfig,
+  ValidateTlsServerConfig,
+  type cluster_tls_client_config_t,
+  type cluster_tls_server_config_t
+} from '../clustertransport/ClusterTlsSecurity.class';
 
 import {
   ClusterInMemoryServiceDiscoveryStore,
@@ -70,7 +80,7 @@ export type cluster_service_discovery_daemon_peer_endpoint_t = {
   host: string;
   port: number;
   request_path?: string;
-  tls_mode?: 'disabled' | 'required';
+  tls_mode?: 'required';
 };
 
 export type cluster_service_discovery_daemon_ha_config_t = {
@@ -93,6 +103,10 @@ export type cluster_service_discovery_daemon_constructor_params_t = {
   service_discovery_store?: cluster_service_discovery_store_i;
   authenticate_request?: cluster_service_discovery_daemon_authenticate_request_t;
   ha?: cluster_service_discovery_daemon_ha_config_t;
+  security?: {
+    tls?: cluster_tls_server_config_t;
+  };
+  transport_security?: cluster_tls_client_config_t;
 };
 
 export type cluster_service_discovery_daemon_address_t = {
@@ -192,10 +206,16 @@ function BuildRequestPath(params: { request_path: string | undefined }): string 
 function BuildTransportAuthority(params: {
   host: string;
   port: number;
-  tls_mode: 'disabled' | 'required';
+  tls_mode: 'required';
 }): string {
-  const scheme = params.tls_mode === 'required' ? 'https' : 'http';
-  return `${scheme}://${params.host}:${params.port}`;
+  if (params.tls_mode !== 'required') {
+    throw new Error('Only tls_mode="required" is supported.');
+  }
+
+  return BuildHttpsAuthority({
+    host: params.host,
+    port: params.port
+  });
 }
 
 function BuildDeterministicHash(params: {
@@ -290,7 +310,9 @@ export class ClusterServiceDiscoveryDaemon {
 
   private host: string;
   private port: number;
-  private http2_server: Http2Server | null = null;
+  private readonly tls_server_config: cluster_tls_server_config_t;
+  private readonly tls_client_config: cluster_tls_client_config_t;
+  private http2_server: Http2SecureServer | null = null;
 
   private started_unix_ms: number | null = null;
   private started_discovery_expiration_loop = false;
@@ -368,6 +390,13 @@ export class ClusterServiceDiscoveryDaemon {
   constructor(params: cluster_service_discovery_daemon_constructor_params_t = {}) {
     this.host = params.host ?? '127.0.0.1';
     this.port = params.port ?? 0;
+    this.tls_server_config = ValidateTlsServerConfig({
+      tls_server_config: params.security?.tls
+    });
+    this.tls_client_config = ValidateTlsClientConfig({
+      tls_client_config: params.transport_security,
+      field_prefix: 'cluster_service_discovery_daemon.transport_security'
+    });
     this.request_path = BuildRequestPath({
       request_path: params.request_path
     });
@@ -412,7 +441,7 @@ export class ClusterServiceDiscoveryDaemon {
         host: peer_endpoint.host,
         port: peer_endpoint.port,
         request_path: peer_endpoint.request_path,
-        tls_mode: peer_endpoint.tls_mode ?? 'disabled'
+        tls_mode: peer_endpoint.tls_mode ?? 'required'
       });
     }
 
@@ -435,7 +464,7 @@ export class ClusterServiceDiscoveryDaemon {
         host: peer_endpoint.host,
         port: peer_endpoint.port,
         request_path: peer_endpoint.request_path,
-        tls_mode: peer_endpoint.tls_mode ?? 'disabled'
+        tls_mode: peer_endpoint.tls_mode ?? 'required'
       });
     }
 
@@ -453,7 +482,11 @@ export class ClusterServiceDiscoveryDaemon {
     this.host = params.host ?? this.host;
     this.port = params.port ?? this.port;
 
-    this.http2_server = createServer();
+    this.http2_server = createSecureServer(
+      BuildTlsServerOptions({
+        tls_server_config: this.tls_server_config
+      })
+    );
     this.http2_server.on('request', (request, response): void => {
       void this.handleHttpRequest({ request, response });
     });
@@ -1475,7 +1508,7 @@ export class ClusterServiceDiscoveryDaemon {
         host: this.host,
         port: this.port,
         request_path: this.request_path,
-        tls_mode: 'disabled'
+        tls_mode: 'required'
       };
     }
 
@@ -1489,7 +1522,7 @@ export class ClusterServiceDiscoveryDaemon {
       host: endpoint.host,
       port: endpoint.port,
       request_path: BuildRequestPath({ request_path: endpoint.request_path }),
-      tls_mode: endpoint.tls_mode ?? 'disabled'
+      tls_mode: endpoint.tls_mode ?? 'required'
     };
   }
 
@@ -1505,7 +1538,7 @@ export class ClusterServiceDiscoveryDaemon {
       host: this.host,
       port: this.port,
       request_path: this.request_path,
-      tls_mode: 'disabled'
+      tls_mode: 'required'
     };
 
     for (const [daemon_id, peer_endpoint] of this.peer_endpoint_by_daemon_id.entries()) {
@@ -1514,7 +1547,7 @@ export class ClusterServiceDiscoveryDaemon {
         host: peer_endpoint.host,
         port: peer_endpoint.port,
         request_path: BuildRequestPath({ request_path: peer_endpoint.request_path }),
-        tls_mode: peer_endpoint.tls_mode ?? 'disabled'
+        tls_mode: peer_endpoint.tls_mode ?? 'required'
       };
     }
 
@@ -2109,7 +2142,10 @@ export class ClusterServiceDiscoveryDaemon {
         BuildTransportAuthority({
           host: peer_endpoint.host,
           port: peer_endpoint.port,
-          tls_mode: peer_endpoint.tls_mode ?? 'disabled'
+          tls_mode: peer_endpoint.tls_mode ?? 'required'
+        }),
+        BuildTlsClientConnectOptions({
+          tls_client_config: this.tls_client_config
         })
       );
 

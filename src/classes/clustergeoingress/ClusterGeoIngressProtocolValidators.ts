@@ -318,7 +318,7 @@ function ParseEndpoint(params: {
   host: string;
   port: number;
   request_path: string;
-  tls_mode: 'disabled' | 'required' | 'terminated_upstream';
+  tls_mode: 'required';
 }> {
   const endpoint_result = AsRecord({
     value: params.value,
@@ -362,13 +362,9 @@ function ParseEndpoint(params: {
     return tls_mode_result;
   }
 
-  if (
-    tls_mode_result.value !== 'disabled' &&
-    tls_mode_result.value !== 'required' &&
-    tls_mode_result.value !== 'terminated_upstream'
-  ) {
+  if (tls_mode_result.value !== 'required') {
     return ErrorResult({
-      message: 'endpoint.tls_mode must be disabled|required|terminated_upstream.',
+      message: 'endpoint.tls_mode must be required.',
       details: {
         reason: 'invalid_enum',
         field_name: 'tls_mode',

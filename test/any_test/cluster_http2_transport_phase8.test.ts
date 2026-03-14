@@ -9,6 +9,10 @@ import {
   type cluster_http2_transport_address_t,
   type cluster_http2_transport_event_t
 } from '../../src/index';
+import {
+  BuildSecureClientTlsConfig,
+  BuildSecureNodeTransportSecurity
+} from '../fixtures/secure_transport_config';
 
 type cluster_call_wire_response_t = {
   ack: {
@@ -79,8 +83,15 @@ async function SendProtocolMessage(params: {
   authorization_header?: string;
 }): Promise<cluster_call_wire_response_t | { cancel_ack: { cancelled: boolean } }> {
   const { address, message, raw_body, authorization_header } = params;
+  const transport_security = BuildSecureClientTlsConfig();
 
-  const client = connect(`http://${address.host}:${address.port}`);
+  const client = connect(`https://${address.host}:${address.port}`, {
+    ca: transport_security.ca_pem_list,
+    cert: transport_security.client_cert_pem,
+    key: transport_security.client_key_pem,
+    rejectUnauthorized: transport_security.reject_unauthorized,
+    servername: transport_security.servername
+  });
 
   try {
     const request_headers: Record<string, string> = {
@@ -160,6 +171,7 @@ test('http2 transport executes cluster call over network path with deterministic
     node_id: 'node_local_phase8',
     worker_start_count: 1,
     transport: {
+      security: BuildSecureNodeTransportSecurity(),
       authenticate_request: function (params) {
         const authorization_header = ReadAuthorizationHeader({
           authorization_header_value: params.headers.authorization
@@ -237,6 +249,7 @@ test('http2 transport returns deterministic errors for malformed payload, auth f
     node_id: 'node_local_phase8_errors',
     worker_start_count: 1,
     transport: {
+      security: BuildSecureNodeTransportSecurity(),
       authenticate_request: function (params) {
         const authorization_header = ReadAuthorizationHeader({
           authorization_header_value: params.headers.authorization
@@ -360,6 +373,7 @@ test('http2 transport session disconnect cleans in-flight request tracking', asy
     node_id: 'node_local_phase8_disconnect',
     worker_start_count: 1,
     transport: {
+      security: BuildSecureNodeTransportSecurity(),
       authenticate_request: function (params) {
         const authorization_header = ReadAuthorizationHeader({
           authorization_header_value: params.headers.authorization
@@ -414,7 +428,14 @@ test('http2 transport session disconnect cleans in-flight request tracking', asy
 
     const address = await cluster_node_agent.start();
 
-    const client: ClientHttp2Session = connect(`http://${address.host}:${address.port}`);
+    const transport_security = BuildSecureClientTlsConfig();
+    const client: ClientHttp2Session = connect(`https://${address.host}:${address.port}`, {
+      ca: transport_security.ca_pem_list,
+      cert: transport_security.client_cert_pem,
+      key: transport_security.client_key_pem,
+      rejectUnauthorized: transport_security.reject_unauthorized,
+      servername: transport_security.servername
+    });
     client.on('error', (): void => {
       // Ignore expected disconnect errors during cancellation simulation.
     });

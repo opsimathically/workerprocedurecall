@@ -25,7 +25,7 @@ export type cluster_control_plane_gateway_address_t = {
   host: string;
   port: number;
   request_path: string;
-  tls_mode: 'disabled' | 'required' | 'terminated_upstream';
+  tls_mode: 'required';
 };
 
 export type cluster_control_plane_node_reference_t = {

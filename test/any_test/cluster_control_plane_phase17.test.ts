@@ -13,6 +13,11 @@ import {
   WorkerProcedureCall,
   type cluster_control_plane_request_message_t
 } from '../../src/index';
+import {
+  BuildSecureClientTlsConfig,
+  BuildSecureNodeTransportSecurity,
+  BuildSecureServerTlsConfig
+} from '../fixtures/secure_transport_config';
 
 function Sleep(params: { delay_ms: number }): Promise<void> {
   return new Promise<void>((resolve): void => {
@@ -70,7 +75,7 @@ test('phase17 protocol validator accepts all control-plane request message forms
         host: '127.0.0.1',
         port: 8080,
         request_path: '/wpc/cluster/protocol',
-        tls_mode: 'disabled'
+        tls_mode: 'required'
       },
       status: 'active',
       gateway_version: '1.0.0'
@@ -169,8 +174,11 @@ test('phase17 protocol validator accepts all control-plane request message forms
 
 test('phase17 multi-gateway control-plane registration and topology convergence works', async function () {
   const control_plane_service = new ClusterControlPlaneService({
-    host: '127.0.0.1',
-    port: 0
+    host: 'localhost',
+    port: 0,
+    security: {
+      tls: BuildSecureServerTlsConfig()
+    }
   });
 
   const workerprocedurecall_a = new WorkerProcedureCall();
@@ -185,19 +193,24 @@ test('phase17 multi-gateway control-plane registration and topology convergence 
       host: control_plane_address.host,
       port: control_plane_address.port,
       request_path: control_plane_address.request_path,
-      tls_mode: 'disabled' as const
+      tls_mode: 'required' as const
     };
 
     node_agent_a = new ClusterNodeAgent({
       workerprocedurecall: workerprocedurecall_a,
       node_id: 'phase17_node_a',
       worker_start_count: 1,
+      transport: {
+        host: 'localhost',
+        security: BuildSecureNodeTransportSecurity()
+      },
       discovery: {
         enabled: false
       },
       control_plane: {
         enabled: true,
         endpoint,
+        transport_security: BuildSecureClientTlsConfig(),
         sync_interval_ms: 100,
         heartbeat_interval_ms: 100
       }
@@ -207,12 +220,17 @@ test('phase17 multi-gateway control-plane registration and topology convergence 
       workerprocedurecall: workerprocedurecall_b,
       node_id: 'phase17_node_b',
       worker_start_count: 1,
+      transport: {
+        host: 'localhost',
+        security: BuildSecureNodeTransportSecurity()
+      },
       discovery: {
         enabled: false
       },
       control_plane: {
         enabled: true,
         endpoint,
+        transport_security: BuildSecureClientTlsConfig(),
         sync_interval_ms: 100,
         heartbeat_interval_ms: 100
       }
@@ -250,8 +268,11 @@ test('phase17 multi-gateway control-plane registration and topology convergence 
 
 test('phase17 policy publish syncs to gateway and applies routing/auth policy versions', async function () {
   const control_plane_service = new ClusterControlPlaneService({
-    host: '127.0.0.1',
-    port: 0
+    host: 'localhost',
+    port: 0,
+    security: {
+      tls: BuildSecureServerTlsConfig()
+    }
   });
 
   const workerprocedurecall = new WorkerProcedureCall();
@@ -268,6 +289,10 @@ test('phase17 policy publish syncs to gateway and applies routing/auth policy ve
       workerprocedurecall,
       node_id: 'phase17_policy_node',
       worker_start_count: 1,
+      transport: {
+        host: 'localhost',
+        security: BuildSecureNodeTransportSecurity()
+      },
       discovery: {
         enabled: false
       },
@@ -277,8 +302,9 @@ test('phase17 policy publish syncs to gateway and applies routing/auth policy ve
           host: control_plane_address.host,
           port: control_plane_address.port,
           request_path: control_plane_address.request_path,
-          tls_mode: 'disabled'
+          tls_mode: 'required'
         },
+        transport_security: BuildSecureClientTlsConfig(),
         sync_interval_ms: 100,
         heartbeat_interval_ms: 100
       }
@@ -320,8 +346,11 @@ test('phase17 policy publish syncs to gateway and applies routing/auth policy ve
 
 test('phase17 temporary control-plane outage keeps gateway serving with last-known-good config and exposes staleness', async function () {
   const control_plane_service = new ClusterControlPlaneService({
-    host: '127.0.0.1',
-    port: 0
+    host: 'localhost',
+    port: 0,
+    security: {
+      tls: BuildSecureServerTlsConfig()
+    }
   });
 
   const workerprocedurecall = new WorkerProcedureCall();
@@ -342,6 +371,10 @@ test('phase17 temporary control-plane outage keeps gateway serving with last-kno
       workerprocedurecall,
       node_id: 'phase17_outage_node',
       worker_start_count: 1,
+      transport: {
+        host: 'localhost',
+        security: BuildSecureNodeTransportSecurity()
+      },
       discovery: {
         enabled: false
       },
@@ -351,8 +384,9 @@ test('phase17 temporary control-plane outage keeps gateway serving with last-kno
           host: control_plane_address.host,
           port: control_plane_address.port,
           request_path: control_plane_address.request_path,
-          tls_mode: 'disabled'
+          tls_mode: 'required'
         },
+        transport_security: BuildSecureClientTlsConfig(),
         sync_interval_ms: 100,
         heartbeat_interval_ms: 100
       }
@@ -395,9 +429,12 @@ test('phase17 control-plane state persists active policy version across service 
     });
 
     first_service = new ClusterControlPlaneService({
-      host: '127.0.0.1',
+      host: 'localhost',
       port: 0,
-      state_store: first_state_store
+      state_store: first_state_store,
+      security: {
+        tls: BuildSecureServerTlsConfig()
+      }
     });
 
     const first_address = await first_service.start();
@@ -406,8 +443,9 @@ test('phase17 control-plane state persists active policy version across service 
         host: first_address.host,
         port: first_address.port,
         request_path: first_address.request_path,
-        tls_mode: 'disabled'
-      }
+        tls_mode: 'required'
+      },
+      transport_security: BuildSecureClientTlsConfig()
     });
 
     const policy_record = await first_service.publishPolicySnapshot({
@@ -433,9 +471,12 @@ test('phase17 control-plane state persists active policy version across service 
     });
 
     second_service = new ClusterControlPlaneService({
-      host: '127.0.0.1',
+      host: 'localhost',
       port: 0,
-      state_store: second_state_store
+      state_store: second_state_store,
+      security: {
+        tls: BuildSecureServerTlsConfig()
+      }
     });
 
     const second_address = await second_service.start();
@@ -444,8 +485,9 @@ test('phase17 control-plane state persists active policy version across service 
         host: second_address.host,
         port: second_address.port,
         request_path: second_address.request_path,
-        tls_mode: 'disabled'
-      }
+        tls_mode: 'required'
+      },
+      transport_security: BuildSecureClientTlsConfig()
     });
 
     const second_policy_snapshot = await second_gateway_adapter.getPolicySnapshot();
@@ -465,8 +507,11 @@ test('phase17 control-plane state persists active policy version across service 
 
 test('phase17 conflicting policy expected_active_policy_version_id is rejected deterministically', async function () {
   const control_plane_service = new ClusterControlPlaneService({
-    host: '127.0.0.1',
-    port: 0
+    host: 'localhost',
+    port: 0,
+    security: {
+      tls: BuildSecureServerTlsConfig()
+    }
   });
 
   try {
@@ -537,9 +582,12 @@ test('phase17 conflicting policy expected_active_policy_version_id is rejected d
 
 test('phase17 gateway lease expiry marks inactive gateways when heartbeats stop', async function () {
   const control_plane_service = new ClusterControlPlaneService({
-    host: '127.0.0.1',
+    host: 'localhost',
     port: 0,
-    gateway_expiration_check_interval_ms: 50
+    gateway_expiration_check_interval_ms: 50,
+    security: {
+      tls: BuildSecureServerTlsConfig()
+    }
   });
 
   try {
@@ -550,8 +598,9 @@ test('phase17 gateway lease expiry marks inactive gateways when heartbeats stop'
         host: address.host,
         port: address.port,
         request_path: address.request_path,
-        tls_mode: 'disabled'
-      }
+        tls_mode: 'required'
+      },
+      transport_security: BuildSecureClientTlsConfig()
     });
 
     await gateway_adapter.registerGateway({
@@ -563,7 +612,7 @@ test('phase17 gateway lease expiry marks inactive gateways when heartbeats stop'
         host: '127.0.0.1',
         port: 8181,
         request_path: '/wpc/cluster/protocol',
-        tls_mode: 'disabled'
+        tls_mode: 'required'
       },
       status: 'active',
       gateway_version: 'phase17',
@@ -602,6 +651,10 @@ test('phase17 disabled control-plane mode preserves baseline node-agent behavior
     workerprocedurecall,
     node_id: 'phase17_disabled_mode_node',
     worker_start_count: 1,
+    transport: {
+      host: 'localhost',
+      security: BuildSecureNodeTransportSecurity()
+    },
     discovery: {
       enabled: false
     },

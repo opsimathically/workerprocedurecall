@@ -1,4 +1,10 @@
 import { connect, type ClientHttp2Session } from 'node:http2';
+import {
+  BuildHttpsAuthority,
+  BuildTlsClientConnectOptions,
+  ValidateTlsClientConfig,
+  type cluster_tls_client_config_t
+} from '../clustertransport/ClusterTlsSecurity.class';
 
 import type {
   cluster_control_plane_gateway_address_t,
@@ -27,7 +33,7 @@ export type cluster_control_plane_gateway_adapter_endpoint_t = {
   host: string;
   port: number;
   request_path?: string;
-  tls_mode?: 'disabled' | 'required';
+  tls_mode?: 'required';
 };
 
 export type cluster_control_plane_gateway_adapter_constructor_params_t = {
@@ -40,6 +46,7 @@ export type cluster_control_plane_gateway_adapter_constructor_params_t = {
   max_request_attempts?: number;
   auth_headers?: Record<string, string>;
   auth_headers_provider?: cluster_control_plane_gateway_adapter_auth_headers_provider_t;
+  transport_security?: cluster_tls_client_config_t;
 };
 
 type cluster_control_plane_gateway_adapter_endpoint_state_t = {
@@ -47,7 +54,7 @@ type cluster_control_plane_gateway_adapter_endpoint_state_t = {
   host: string;
   port: number;
   request_path: string;
-  tls_mode: 'disabled' | 'required';
+  tls_mode: 'required';
   failure_count: number;
   last_failure_unix_ms: number | null;
   cooldown_until_unix_ms: number;
@@ -73,7 +80,7 @@ export type cluster_control_plane_gateway_adapter_snapshot_t = {
     host: string;
     port: number;
     request_path: string;
-    tls_mode: 'disabled' | 'required';
+    tls_mode: 'required';
     failure_count: number;
     cooldown_until_unix_ms: number;
     last_success_unix_ms: number | null;
@@ -96,10 +103,16 @@ function BuildRequestPath(params: { request_path: string | undefined }): string 
 function BuildTransportAuthority(params: {
   host: string;
   port: number;
-  tls_mode: 'disabled' | 'required';
+  tls_mode: 'required';
 }): string {
-  const scheme = params.tls_mode === 'required' ? 'https' : 'http';
-  return `${scheme}://${params.host}:${params.port}`;
+  if (params.tls_mode !== 'required') {
+    throw new Error('Only tls_mode="required" is supported.');
+  }
+
+  return BuildHttpsAuthority({
+    host: params.host,
+    port: params.port
+  });
 }
 
 function NormalizeHeaders(params: {
@@ -154,6 +167,7 @@ export class ClusterControlPlaneGatewayAdapter {
   private readonly auth_headers_provider:
     | cluster_control_plane_gateway_adapter_auth_headers_provider_t
     | undefined;
+  private readonly transport_security: cluster_tls_client_config_t;
 
   private next_request_index = 1;
 
@@ -177,6 +191,10 @@ export class ClusterControlPlaneGatewayAdapter {
       headers: params.auth_headers
     });
     this.auth_headers_provider = params.auth_headers_provider;
+    this.transport_security = ValidateTlsClientConfig({
+      tls_client_config: params.transport_security,
+      field_prefix: 'cluster_control_plane_gateway_adapter.transport_security'
+    });
 
     const endpoint_list = Array.isArray(params.endpoint_list)
       ? params.endpoint_list
@@ -215,7 +233,7 @@ export class ClusterControlPlaneGatewayAdapter {
         host: endpoint.host,
         port: endpoint.port,
         request_path,
-        tls_mode: endpoint.tls_mode ?? 'disabled',
+        tls_mode: endpoint.tls_mode ?? 'required',
         failure_count: existing_endpoint_state?.failure_count ?? 0,
         last_failure_unix_ms: existing_endpoint_state?.last_failure_unix_ms ?? null,
         cooldown_until_unix_ms: existing_endpoint_state?.cooldown_until_unix_ms ?? 0,
@@ -670,7 +688,12 @@ export class ClusterControlPlaneGatewayAdapter {
       tls_mode: params.endpoint_state.tls_mode
     });
 
-    const client_session: ClientHttp2Session = connect(authority);
+    const client_session: ClientHttp2Session = connect(
+      authority,
+      BuildTlsClientConnectOptions({
+        tls_client_config: this.transport_security
+      })
+    );
     client_session.on('error', (): void => {
       // request_stream error handling below captures operation failure paths;
       // this prevents unhandled session errors during endpoint outage windows.

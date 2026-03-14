@@ -10,6 +10,10 @@ import {
   type cluster_service_discovery_response_success_message_i,
   type cluster_service_discovery_daemon_peer_endpoint_t
 } from '../../src/index';
+import {
+  BuildSecureClientTlsConfig,
+  BuildSecureServerTlsConfig
+} from '../fixtures/secure_transport_config';
 
 type discovery_response_t =
   | cluster_service_discovery_response_success_message_i
@@ -47,7 +51,14 @@ async function SendDiscoveryMessage(params: {
   message: unknown;
 }): Promise<discovery_response_t> {
   const client_session: ClientHttp2Session = connect(
-    `http://${params.host}:${params.port}`
+    `https://${params.host}:${params.port}`,
+    {
+      ca: BuildSecureClientTlsConfig().ca_pem_list,
+      cert: BuildSecureClientTlsConfig().client_cert_pem,
+      key: BuildSecureClientTlsConfig().client_key_pem,
+      rejectUnauthorized: BuildSecureClientTlsConfig().reject_unauthorized ?? true,
+      servername: BuildSecureClientTlsConfig().servername
+    }
   );
 
   try {
@@ -154,6 +165,10 @@ async function StartHaDaemonCluster(params: {
     const daemon = new ClusterServiceDiscoveryDaemon({
       host: '127.0.0.1',
       port: 0,
+      security: {
+        tls: BuildSecureServerTlsConfig()
+      },
+      transport_security: BuildSecureClientTlsConfig(),
       ha: {
         enabled: true,
         daemon_id,
@@ -184,7 +199,7 @@ async function StartHaDaemonCluster(params: {
             host: peer_daemon_state.address.host,
             port: peer_daemon_state.address.port,
             request_path: peer_daemon_state.address.request_path,
-            tls_mode: 'disabled'
+            tls_mode: 'required'
           };
         });
 
@@ -296,7 +311,7 @@ test('phase16 cluster elects single leader, redirects writes on followers, and r
             host: '127.0.0.1',
             port: 9999,
             request_path: '/wpc/cluster/protocol',
-            tls_mode: 'disabled'
+            tls_mode: 'required'
           }
         },
         status: 'ready'
@@ -327,7 +342,7 @@ test('phase16 cluster elects single leader, redirects writes on followers, and r
             host: '127.0.0.1',
             port: 9999,
             request_path: '/wpc/cluster/protocol',
-            tls_mode: 'disabled'
+            tls_mode: 'required'
           }
         },
         status: 'ready'
@@ -399,7 +414,7 @@ test('phase16 leader failover continues writes through multi-endpoint remote ada
         host: daemon_state.address.host,
         port: daemon_state.address.port,
         request_path: daemon_state.address.request_path,
-        tls_mode: 'disabled'
+        tls_mode: 'required'
       };
     }),
     request_timeout_ms: 1_000,
@@ -407,7 +422,8 @@ test('phase16 leader failover continues writes through multi-endpoint remote ada
     retry_base_delay_ms: 25,
     retry_max_delay_ms: 100,
     endpoint_cooldown_ms: 60,
-    max_request_attempts: 8
+    max_request_attempts: 8,
+    transport_security: BuildSecureClientTlsConfig()
   });
 
   adapter.startExpirationLoop();
@@ -425,11 +441,11 @@ test('phase16 leader failover continues writes through multi-endpoint remote ada
           host: '127.0.0.1',
           port: 9998,
           request_path: '/wpc/cluster/protocol',
-          tls_mode: 'disabled'
+          tls_mode: 'required'
         }
       },
       status: 'ready',
-      lease_ttl_ms: 2_000
+      lease_ttl_ms: 20_000
     });
 
     await WaitForCondition({
@@ -455,13 +471,21 @@ test('phase16 leader failover continues writes through multi-endpoint remote ada
       timeout_ms: 6_000
     });
 
-    adapter.updateNodeHeartbeat({
-      node_id: 'phase16_adapter_node',
+    adapter.upsertNodeRegistration({
+      node_identity: {
+        node_id: 'phase16_adapter_node',
+        address: {
+          host: '127.0.0.1',
+          port: 9998,
+          request_path: '/wpc/cluster/protocol',
+          tls_mode: 'required'
+        }
+      },
       status: 'degraded',
       metrics: {
         inflight_calls: 1
       },
-      lease_ttl_ms: 2_000
+      lease_ttl_ms: 20_000
     });
 
     await WaitForCondition({
@@ -527,7 +551,7 @@ test('phase16 returns deterministic quorum unavailable error when majority is lo
             host: '127.0.0.1',
             port: 10001,
             request_path: '/wpc/cluster/protocol',
-            tls_mode: 'disabled'
+            tls_mode: 'required'
           }
         },
         status: 'ready'

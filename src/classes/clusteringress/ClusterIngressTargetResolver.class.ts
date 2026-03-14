@@ -24,6 +24,7 @@ import {
 } from '../clustercontrolplane/ClusterControlPlaneGatewayAdapter.class';
 import type { cluster_control_plane_gateway_record_t } from '../clustercontrolplane/ClusterControlPlaneProtocol';
 import type { cluster_call_request_message_i } from '../clusterprotocol/ClusterProtocolTypes';
+import type { cluster_tls_client_config_t } from '../clustertransport/ClusterTlsSecurity.class';
 import type {
   ingress_balancer_target_record_t,
   ingress_balancer_target_snapshot_t
@@ -36,7 +37,7 @@ export type cluster_ingress_static_target_t = {
     host: string;
     port: number;
     request_path: string;
-    tls_mode: 'disabled' | 'required' | 'terminated_upstream';
+    tls_mode: 'required';
   };
   zones?: string[];
   labels?: Record<string, string>;
@@ -56,6 +57,7 @@ export type cluster_ingress_target_resolver_constructor_params_t = {
     retry_max_delay_ms?: number;
     endpoint_cooldown_ms?: number;
     max_request_attempts?: number;
+    transport_security?: cluster_tls_client_config_t;
   };
   discovery?: {
     service_discovery_store?: cluster_service_discovery_store_i;
@@ -69,6 +71,7 @@ export type cluster_ingress_target_resolver_constructor_params_t = {
     retry_max_delay_ms?: number;
     endpoint_cooldown_ms?: number;
     max_request_attempts?: number;
+    transport_security?: cluster_tls_client_config_t;
   };
   geo_control_plane?: {
     adapter?: ClusterGeoIngressAdapter;
@@ -84,6 +87,7 @@ export type cluster_ingress_target_resolver_constructor_params_t = {
     enabled?: boolean;
     mode?: 'global' | 'regional';
     region_id?: string;
+    transport_security?: cluster_tls_client_config_t;
   };
   static_target_list?: cluster_ingress_static_target_t[];
   refresh_interval_ms?: number;
@@ -224,7 +228,8 @@ export class ClusterIngressTargetResolver {
         retry_base_delay_ms: params.geo_control_plane.retry_base_delay_ms,
         retry_max_delay_ms: params.geo_control_plane.retry_max_delay_ms,
         endpoint_cooldown_ms: params.geo_control_plane.endpoint_cooldown_ms,
-        max_request_attempts: params.geo_control_plane.max_request_attempts
+        max_request_attempts: params.geo_control_plane.max_request_attempts,
+        transport_security: params.geo_control_plane.transport_security
       });
     } else {
       this.geo_ingress_adapter = null;
@@ -246,7 +251,8 @@ export class ClusterIngressTargetResolver {
         endpoint_cooldown_ms: params.control_plane.endpoint_cooldown_ms,
         max_request_attempts: params.control_plane.max_request_attempts,
         auth_headers: params.control_plane.auth_headers,
-        auth_headers_provider: params.control_plane.auth_headers_provider
+        auth_headers_provider: params.control_plane.auth_headers_provider,
+        transport_security: params.control_plane.transport_security
       });
     } else {
       this.control_plane_gateway_adapter = null;
@@ -275,7 +281,8 @@ export class ClusterIngressTargetResolver {
         retry_base_delay_ms: params.discovery?.retry_base_delay_ms,
         retry_max_delay_ms: params.discovery?.retry_max_delay_ms,
         endpoint_cooldown_ms: params.discovery?.endpoint_cooldown_ms,
-        max_request_attempts: params.discovery?.max_request_attempts
+        max_request_attempts: params.discovery?.max_request_attempts,
+        transport_security: params.discovery?.transport_security
       });
     } else {
       this.service_discovery_store = null;

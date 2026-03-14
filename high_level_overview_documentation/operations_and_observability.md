@@ -29,6 +29,11 @@ You now have runtime snapshots, lifecycle event streams, transport metrics, muta
   - session connect/disconnect/auth
   - request completed/failed/cancelled
   - auth/replay-related failures
+  - secure transport posture metrics:
+    - `tls_handshake_failures_total`
+    - `mtls_auth_failures_total`
+    - `token_validation_failures_total`
+    - `replay_rejections_total`
 - Discovery (`ClusterNodeAgent` / discovery store)
   - registered/active/expired node counts
   - heartbeat lag and expiry counters

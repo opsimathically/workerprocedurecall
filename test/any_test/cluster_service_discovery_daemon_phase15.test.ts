@@ -12,6 +12,11 @@ import {
   type cluster_service_discovery_response_error_message_i,
   type cluster_service_discovery_response_success_message_i
 } from '../../src/index';
+import {
+  BuildSecureClientTlsConfig,
+  BuildSecureNodeTransportSecurity,
+  BuildSecureServerTlsConfig
+} from '../fixtures/secure_transport_config';
 
 async function WaitForCondition(params: {
   timeout_ms: number;
@@ -98,7 +103,14 @@ async function SendDiscoveryMessage(params: {
   cluster_service_discovery_response_success_message_i | cluster_service_discovery_response_error_message_i
 > {
   const client_session: ClientHttp2Session = connect(
-    `http://${params.host}:${params.port}`
+    `https://${params.host}:${params.port}`,
+    {
+      ca: BuildSecureClientTlsConfig().ca_pem_list,
+      cert: BuildSecureClientTlsConfig().client_cert_pem,
+      key: BuildSecureClientTlsConfig().client_key_pem,
+      rejectUnauthorized: BuildSecureClientTlsConfig().reject_unauthorized ?? true,
+      servername: BuildSecureClientTlsConfig().servername
+    }
   );
 
   try {
@@ -171,7 +183,11 @@ test('phase15 protocol validator accepts valid request and rejects malformed req
 test('phase15 discovery daemon handles register heartbeat capability remove and validation failure', async function () {
   const discovery_daemon = new ClusterServiceDiscoveryDaemon({
     host: '127.0.0.1',
-    port: 0
+    port: 0,
+    security: {
+      tls: BuildSecureServerTlsConfig()
+    },
+    transport_security: BuildSecureClientTlsConfig()
   });
 
   try {
@@ -192,7 +208,7 @@ test('phase15 discovery daemon handles register heartbeat capability remove and 
             host: '127.0.0.1',
             port: 8080,
             request_path: '/wpc/cluster/protocol',
-            tls_mode: 'disabled'
+            tls_mode: 'required'
           },
           labels: {
             env: 'test'
@@ -317,7 +333,11 @@ test('phase15 discovery daemon handles register heartbeat capability remove and 
 test('phase15 external daemon integration auto-discovers nodes and reroutes on node stop', async function () {
   const discovery_daemon = new ClusterServiceDiscoveryDaemon({
     host: '127.0.0.1',
-    port: 0
+    port: 0,
+    security: {
+      tls: BuildSecureServerTlsConfig()
+    },
+    transport_security: BuildSecureClientTlsConfig()
   });
 
   const workerprocedurecall_gateway = new WorkerProcedureCall();
@@ -360,7 +380,9 @@ test('phase15 external daemon integration auto-discovers nodes and reroutes on n
       workerprocedurecall: workerprocedurecall_gateway,
       node_id: 'phase15_gateway',
       transport: {
-        authenticate_request: BuildPermissiveAuthenticateRequest()
+        host: 'localhost',
+        authenticate_request: BuildPermissiveAuthenticateRequest(),
+        security: BuildSecureNodeTransportSecurity()
       },
       discovery: {
         enabled: true,
@@ -368,6 +390,7 @@ test('phase15 external daemon integration auto-discovers nodes and reroutes on n
           host: daemon_address.host,
           port: daemon_address.port,
           request_path: daemon_address.request_path,
+          transport_security: BuildSecureClientTlsConfig(),
           synchronization_interval_ms: 25,
           request_timeout_ms: 500
         },
@@ -382,7 +405,9 @@ test('phase15 external daemon integration auto-discovers nodes and reroutes on n
       node_id: 'phase15_node_b',
       worker_start_count: 1,
       transport: {
-        authenticate_request: BuildPermissiveAuthenticateRequest()
+        host: 'localhost',
+        authenticate_request: BuildPermissiveAuthenticateRequest(),
+        security: BuildSecureNodeTransportSecurity()
       },
       discovery: {
         enabled: true,
@@ -390,6 +415,7 @@ test('phase15 external daemon integration auto-discovers nodes and reroutes on n
           host: daemon_address.host,
           port: daemon_address.port,
           request_path: daemon_address.request_path,
+          transport_security: BuildSecureClientTlsConfig(),
           synchronization_interval_ms: 25,
           request_timeout_ms: 500
         },
@@ -404,7 +430,9 @@ test('phase15 external daemon integration auto-discovers nodes and reroutes on n
       node_id: 'phase15_node_c',
       worker_start_count: 1,
       transport: {
-        authenticate_request: BuildPermissiveAuthenticateRequest()
+        host: 'localhost',
+        authenticate_request: BuildPermissiveAuthenticateRequest(),
+        security: BuildSecureNodeTransportSecurity()
       },
       discovery: {
         enabled: true,
@@ -412,6 +440,7 @@ test('phase15 external daemon integration auto-discovers nodes and reroutes on n
           host: daemon_address.host,
           port: daemon_address.port,
           request_path: daemon_address.request_path,
+          transport_security: BuildSecureClientTlsConfig(),
           synchronization_interval_ms: 25,
           request_timeout_ms: 500
         },
@@ -511,13 +540,16 @@ test('phase15 daemon unavailable does not crash node agent and records discovery
     node_id: 'phase15_unavailable_node',
     worker_start_count: 1,
     transport: {
-      authenticate_request: BuildPermissiveAuthenticateRequest()
+      host: 'localhost',
+      authenticate_request: BuildPermissiveAuthenticateRequest(),
+      security: BuildSecureNodeTransportSecurity()
     },
     discovery: {
       enabled: true,
       external_daemon: {
         host: '127.0.0.1',
         port: unavailable_port,
+        transport_security: BuildSecureClientTlsConfig(),
         synchronization_interval_ms: 25,
         request_timeout_ms: 100,
         retry_base_delay_ms: 10,

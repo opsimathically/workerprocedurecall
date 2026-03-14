@@ -11,6 +11,11 @@ import {
   ParseClusterGeoIngressRequestMessage,
   WorkerProcedureCall
 } from '../../src/index';
+import {
+  BuildSecureClientTlsConfig,
+  BuildSecureNodeTransportSecurity,
+  BuildSecureServerTlsConfig
+} from '../fixtures/secure_transport_config';
 
 function Sleep(params: { delay_ms: number }): Promise<void> {
   return new Promise<void>((resolve): void => {
@@ -76,6 +81,9 @@ async function BuildNodeAgent(params: {
     workerprocedurecall,
     node_id: params.node_id,
     worker_start_count: 1,
+    transport: {
+      security: BuildSecureNodeTransportSecurity()
+    },
     discovery: {
       enabled: false
     }
@@ -94,7 +102,7 @@ test('phase19 geo ingress protocol validator accepts valid register payload and 
       host: '127.0.0.1',
       port: 7001,
       request_path: '/wpc/cluster/ingress',
-      tls_mode: 'disabled'
+      tls_mode: 'required'
     },
     health_status: 'ready',
     ingress_version: 'phase19'
@@ -119,7 +127,10 @@ test('phase19 global ingress routes by geo policy and fails over across regions'
     host: '127.0.0.1',
     port: 0,
     ingress_default_lease_ttl_ms: 5_000,
-    ingress_expiration_check_interval_ms: 200
+    ingress_expiration_check_interval_ms: 200,
+    security: {
+      tls: BuildSecureServerTlsConfig()
+    }
   });
 
   let east_node_agent: ClusterNodeAgent | null = null;
@@ -150,6 +161,10 @@ test('phase19 global ingress routes by geo policy and fails over across regions'
       host: '127.0.0.1',
       port: 0,
       max_attempts: 1,
+      transport_security: BuildSecureClientTlsConfig(),
+      security: {
+        tls: BuildSecureServerTlsConfig()
+      },
       static_target_list: [
         {
           target_id: 'phase19_east_node',
@@ -168,6 +183,10 @@ test('phase19 global ingress routes by geo policy and fails over across regions'
       host: '127.0.0.1',
       port: 0,
       max_attempts: 1,
+      transport_security: BuildSecureClientTlsConfig(),
+      security: {
+        tls: BuildSecureServerTlsConfig()
+      },
       static_target_list: [
         {
           target_id: 'phase19_west_node',
@@ -190,8 +209,9 @@ test('phase19 global ingress routes by geo policy and fails over across regions'
         host: geo_address.host,
         port: geo_address.port,
         request_path: geo_address.request_path,
-        tls_mode: 'disabled'
-      }
+        tls_mode: 'required'
+      },
+      transport_security: BuildSecureClientTlsConfig()
     });
 
     await geo_ingress_adapter.registerIngress({
@@ -201,7 +221,7 @@ test('phase19 global ingress routes by geo policy and fails over across regions'
         host: east_regional_ingress_address.host,
         port: east_regional_ingress_address.port,
         request_path: east_regional_ingress_address.request_path,
-        tls_mode: 'disabled'
+        tls_mode: 'required'
       },
       health_status: 'ready',
       ingress_version: 'phase19',
@@ -224,7 +244,7 @@ test('phase19 global ingress routes by geo policy and fails over across regions'
         host: west_regional_ingress_address.host,
         port: west_regional_ingress_address.port,
         request_path: west_regional_ingress_address.request_path,
-        tls_mode: 'disabled'
+        tls_mode: 'required'
       },
       health_status: 'ready',
       ingress_version: 'phase19',
@@ -247,6 +267,10 @@ test('phase19 global ingress routes by geo policy and fails over across regions'
       max_attempts: 4,
       target_refresh_interval_ms: 100,
       stale_snapshot_max_age_ms: 5_000,
+      transport_security: BuildSecureClientTlsConfig(),
+      security: {
+        tls: BuildSecureServerTlsConfig()
+      },
       geo_ingress: {
         enabled: true,
         role: 'global',
@@ -255,11 +279,12 @@ test('phase19 global ingress routes by geo policy and fails over across regions'
           host: geo_address.host,
           port: geo_address.port,
           request_path: geo_address.request_path,
-          tls_mode: 'disabled'
+          tls_mode: 'required'
         },
         sync_interval_ms: 250,
         stale_snapshot_max_age_ms: 2_000,
-        max_cross_region_attempts: 2
+        max_cross_region_attempts: 2,
+        transport_security: BuildSecureClientTlsConfig()
       }
     });
 
@@ -269,6 +294,7 @@ test('phase19 global ingress routes by geo policy and fails over across regions'
       host: global_address.host,
       port: global_address.port,
       request_path: global_address.request_path,
+      transport_security: BuildSecureClientTlsConfig(),
       auth_context: {
         subject: 'phase19_geo_client',
         tenant_id: 'tenant_1',
@@ -340,7 +366,10 @@ test('phase19 geo stale-control mode serves briefly from cache then fails closed
     host: '127.0.0.1',
     port: 0,
     ingress_default_lease_ttl_ms: 5_000,
-    ingress_expiration_check_interval_ms: 250
+    ingress_expiration_check_interval_ms: 250,
+    security: {
+      tls: BuildSecureServerTlsConfig()
+    }
   });
 
   let regional_node_agent: ClusterNodeAgent | null = null;
@@ -361,6 +390,10 @@ test('phase19 geo stale-control mode serves briefly from cache then fails closed
     regional_ingress = new ClusterIngressBalancerService({
       host: '127.0.0.1',
       port: 0,
+      transport_security: BuildSecureClientTlsConfig(),
+      security: {
+        tls: BuildSecureServerTlsConfig()
+      },
       static_target_list: [
         {
           target_id: 'phase19_stale_node',
@@ -381,8 +414,9 @@ test('phase19 geo stale-control mode serves briefly from cache then fails closed
         host: geo_address.host,
         port: geo_address.port,
         request_path: geo_address.request_path,
-        tls_mode: 'disabled'
-      }
+        tls_mode: 'required'
+      },
+      transport_security: BuildSecureClientTlsConfig()
     });
 
     await geo_ingress_adapter.registerIngress({
@@ -392,7 +426,7 @@ test('phase19 geo stale-control mode serves briefly from cache then fails closed
         host: regional_ingress_address.host,
         port: regional_ingress_address.port,
         request_path: regional_ingress_address.request_path,
-        tls_mode: 'disabled'
+        tls_mode: 'required'
       },
       health_status: 'ready',
       ingress_version: 'phase19',
@@ -413,6 +447,10 @@ test('phase19 geo stale-control mode serves briefly from cache then fails closed
       port: 0,
       target_refresh_interval_ms: 100,
       stale_snapshot_max_age_ms: 5_000,
+      transport_security: BuildSecureClientTlsConfig(),
+      security: {
+        tls: BuildSecureServerTlsConfig()
+      },
       geo_ingress: {
         enabled: true,
         role: 'global',
@@ -421,7 +459,7 @@ test('phase19 geo stale-control mode serves briefly from cache then fails closed
           host: geo_address.host,
           port: geo_address.port,
           request_path: geo_address.request_path,
-          tls_mode: 'disabled'
+          tls_mode: 'required'
         },
         request_timeout_ms: 100,
         max_request_attempts: 1,
@@ -430,7 +468,8 @@ test('phase19 geo stale-control mode serves briefly from cache then fails closed
         retry_max_delay_ms: 50,
         sync_interval_ms: 250,
         stale_snapshot_max_age_ms: 450,
-        max_cross_region_attempts: 1
+        max_cross_region_attempts: 1,
+        transport_security: BuildSecureClientTlsConfig()
       }
     });
 
@@ -440,6 +479,7 @@ test('phase19 geo stale-control mode serves briefly from cache then fails closed
       host: global_address.host,
       port: global_address.port,
       request_path: global_address.request_path,
+      transport_security: BuildSecureClientTlsConfig(),
       auth_context: {
         subject: 'phase19_stale_client',
         tenant_id: 'tenant_1',
@@ -514,6 +554,10 @@ test('phase19 geo disabled mode preserves prior static ingress behavior', async 
     ingress_service = new ClusterIngressBalancerService({
       host: '127.0.0.1',
       port: 0,
+      transport_security: BuildSecureClientTlsConfig(),
+      security: {
+        tls: BuildSecureServerTlsConfig()
+      },
       static_target_list: [
         {
           target_id: 'phase19_disabled_node',
@@ -537,6 +581,7 @@ test('phase19 geo disabled mode preserves prior static ingress behavior', async 
       host: ingress_address.host,
       port: ingress_address.port,
       request_path: ingress_address.request_path,
+      transport_security: BuildSecureClientTlsConfig(),
       auth_context: {
         subject: 'phase19_disabled_client',
         tenant_id: 'tenant_1',

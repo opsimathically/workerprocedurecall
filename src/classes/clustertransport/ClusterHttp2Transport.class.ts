@@ -1,21 +1,20 @@
 import {
   constants as http2_constants,
   createSecureServer,
-  createServer,
   type Http2SecureServer,
-  type Http2Server,
   type Http2ServerRequest,
   type Http2ServerResponse,
   type IncomingHttpHeaders,
-  type SecureServerOptions,
   type ServerHttp2Session
 } from 'node:http2';
+import type { TLSSocket } from 'node:tls';
 
 import type {
   cluster_admin_mutation_request_message_i,
   cluster_call_cancel_ack_message_i,
   cluster_call_cancel_message_i,
-  cluster_call_request_message_i
+  cluster_call_request_message_i,
+  cluster_protocol_error_code_t
 } from '../clusterprotocol/ClusterProtocolTypes';
 import { ParseClusterProtocolMessage } from '../clusterprotocol/ClusterProtocolValidators';
 import type {
@@ -30,6 +29,13 @@ import {
   type cluster_transport_token_validation_config_t,
   type cluster_transport_trusted_identity_t
 } from './ClusterTransportAuth.class';
+import {
+  BuildTlsClientConnectOptions,
+  BuildTlsServerOptions,
+  ValidateTlsServerConfig,
+  type cluster_tls_client_config_t,
+  type cluster_tls_server_config_t
+} from './ClusterTlsSecurity.class';
 
 export type cluster_http2_session_identity_t = cluster_transport_trusted_identity_t;
 
@@ -52,20 +58,10 @@ export type cluster_http2_authenticate_request_t = (params: {
   | cluster_http2_authenticate_request_result_t
   | Promise<cluster_http2_authenticate_request_result_t>;
 
-export type cluster_http2_transport_tls_mode_t =
-  | 'disabled'
-  | 'required'
-  | 'terminated_upstream';
+export type cluster_http2_transport_tls_mode_t = 'required';
 
-export type cluster_http2_transport_tls_config_t = {
-  mode: cluster_http2_transport_tls_mode_t;
-  key_pem?: string;
-  cert_pem?: string;
-  ca_pem_list?: string[];
-  request_client_cert?: boolean;
-  reject_unauthorized_client_cert?: boolean;
-  terminated_upstream_assertion_header_name?: string;
-  terminated_upstream_assertion_header_value?: string;
+export type cluster_http2_transport_tls_config_t = cluster_tls_server_config_t & {
+  mode?: cluster_http2_transport_tls_mode_t;
 };
 
 export type cluster_http2_transport_session_security_config_t = {
@@ -127,6 +123,9 @@ export type cluster_http2_transport_metrics_t = {
   request_cancelled_total: number;
   request_failed_total: number;
   auth_failed_total: number;
+  tls_handshake_failures_total: number;
+  mtls_auth_failures_total: number;
+  token_validation_failures_total: number;
   replay_rejected_total: number;
   request_failed_count_by_reason: Record<string, number>;
   request_failed_count_by_error_code: Record<string, number>;
@@ -154,6 +153,7 @@ type cluster_http2_session_state_t = {
   connected_unix_ms: number;
   disconnected_unix_ms?: number;
   remote_address?: string;
+  mtls_identity?: cluster_http2_session_identity_t;
   identity?: cluster_http2_session_identity_t;
   identity_expires_unix_ms?: number;
   in_flight_request_id_set: Set<string>;
@@ -173,6 +173,39 @@ function IsRecordObject(value: unknown): value is Record<string, unknown> {
 
 function BuildSessionId(params: { next_session_index: number }): string {
   return `session_${params.next_session_index}`;
+}
+
+function BuildMutualTlsSessionIdentity(params: {
+  socket: TLSSocket;
+}): cluster_http2_session_identity_t | null {
+  const peer_certificate = params.socket.getPeerCertificate();
+
+  if (!params.socket.authorized) {
+    return null;
+  }
+
+  if (!peer_certificate || Object.keys(peer_certificate).length === 0) {
+    return null;
+  }
+
+  const cert_subject =
+    typeof peer_certificate.subject?.CN === 'string' &&
+    peer_certificate.subject.CN.length > 0
+      ? peer_certificate.subject.CN
+      : typeof peer_certificate.fingerprint256 === 'string' &&
+          peer_certificate.fingerprint256.length > 0
+        ? peer_certificate.fingerprint256
+        : 'unknown_peer';
+
+  return {
+    subject: `mtls:${cert_subject}`,
+    tenant_id: 'mtls',
+    scopes: ['rpc.call:*', 'rpc.admin.mutate:*'],
+    signed_claims:
+      typeof peer_certificate.fingerprint256 === 'string'
+        ? peer_certificate.fingerprint256
+        : 'mtls_signed_claims'
+  };
 }
 
 async function ReadRequestBody(params: {
@@ -295,7 +328,7 @@ export class ClusterHttp2Transport {
   private host: string;
   private port: number;
 
-  private http2_server: Http2Server | Http2SecureServer | null = null;
+  private http2_server: Http2SecureServer | null = null;
   private next_session_index = 1;
 
   private readonly session_state_by_session = new Map<
@@ -328,6 +361,9 @@ export class ClusterHttp2Transport {
     request_cancelled_total: 0,
     request_failed_total: 0,
     auth_failed_total: 0,
+    tls_handshake_failures_total: 0,
+    mtls_auth_failures_total: 0,
+    token_validation_failures_total: 0,
     replay_rejected_total: 0,
     request_failed_count_by_reason: {},
     request_failed_count_by_error_code: {},
@@ -337,10 +373,11 @@ export class ClusterHttp2Transport {
   private readonly token_validator = new ClusterTransportTokenValidator();
   private readonly replay_protection = new ClusterTransportReplayProtection();
 
-  private tls_config: cluster_http2_transport_tls_config_t = {
-    mode: 'disabled',
+  private tls_config: Partial<cluster_http2_transport_tls_config_t> = {
+    mode: 'required',
     request_client_cert: true,
-    reject_unauthorized_client_cert: true
+    reject_unauthorized_client_cert: true,
+    min_tls_version: 'TLSv1.2'
   };
 
   private session_security_config: cluster_http2_transport_session_security_config_t = {
@@ -394,20 +431,26 @@ export class ClusterHttp2Transport {
     const { security_config } = params;
 
     if (security_config.tls) {
+      if (
+        typeof security_config.tls.mode !== 'undefined' &&
+        security_config.tls.mode !== 'required'
+      ) {
+        throw new Error('Only tls.mode="required" is supported. Insecure transport is disabled.');
+      }
+
       this.tls_config = {
-        mode: security_config.tls.mode ?? this.tls_config.mode,
-        key_pem: security_config.tls.key_pem,
-        cert_pem: security_config.tls.cert_pem,
-        ca_pem_list: security_config.tls.ca_pem_list,
+        ...this.tls_config,
+        mode: 'required',
+        key_pem: security_config.tls.key_pem ?? this.tls_config.key_pem,
+        cert_pem: security_config.tls.cert_pem ?? this.tls_config.cert_pem,
+        ca_pem_list: security_config.tls.ca_pem_list ?? this.tls_config.ca_pem_list,
         request_client_cert:
           security_config.tls.request_client_cert ?? this.tls_config.request_client_cert,
         reject_unauthorized_client_cert:
           security_config.tls.reject_unauthorized_client_cert ??
           this.tls_config.reject_unauthorized_client_cert,
-        terminated_upstream_assertion_header_name:
-          security_config.tls.terminated_upstream_assertion_header_name,
-        terminated_upstream_assertion_header_value:
-          security_config.tls.terminated_upstream_assertion_header_value
+        min_tls_version:
+          security_config.tls.min_tls_version ?? this.tls_config.min_tls_version
       };
     }
 
@@ -431,6 +474,10 @@ export class ClusterHttp2Transport {
           this.session_security_config.max_identity_ttl_ms
       };
     }
+
+    ValidateTlsServerConfig({
+      tls_server_config: this.tls_config as cluster_tls_server_config_t
+    });
   }
 
   setTokenValidationConfig(params: {
@@ -482,8 +529,28 @@ export class ClusterHttp2Transport {
       host: this.host,
       port: this.port,
       request_path: this.request_path,
-      tls_mode: this.tls_config.mode
+      tls_mode: 'required'
     };
+  }
+
+  getTlsClientConfig(): cluster_tls_client_config_t {
+    const validated_tls_server_config = ValidateTlsServerConfig({
+      tls_server_config: this.tls_config as cluster_tls_server_config_t
+    });
+
+    return {
+      ca_pem_list: [...validated_tls_server_config.ca_pem_list],
+      client_cert_pem: validated_tls_server_config.cert_pem,
+      client_key_pem: validated_tls_server_config.key_pem,
+      reject_unauthorized: true,
+      min_tls_version: validated_tls_server_config.min_tls_version
+    };
+  }
+
+  getTlsClientConnectOptions(): Record<string, unknown> {
+    return BuildTlsClientConnectOptions({
+      tls_client_config: this.getTlsClientConfig()
+    });
   }
 
   getSessionSnapshot(): cluster_http2_session_snapshot_t[] {
@@ -575,16 +642,32 @@ export class ClusterHttp2Transport {
     const server = this.createHttp2Server();
     this.http2_server = server;
 
+    server.on('sessionError', (error): void => {
+      this.emitTransportEvent({
+        event_name: 'request_failed',
+        details: {
+          reason: 'tls_handshake_failed',
+          terminal_error_code: 'AUTH_CERT_INVALID',
+          error_message: error instanceof Error ? error.message : String(error)
+        }
+      });
+    });
+
     server.on('session', (session): void => {
       const session_id = BuildSessionId({
         next_session_index: this.next_session_index
       });
       this.next_session_index += 1;
 
+      const mtls_identity = BuildMutualTlsSessionIdentity({
+        socket: session.socket as TLSSocket
+      });
+
       const session_state: cluster_http2_session_state_t = {
         session_id,
         connected_unix_ms: Date.now(),
         remote_address: session.socket.remoteAddress,
+        mtls_identity: mtls_identity ?? undefined,
         in_flight_request_id_set: new Set<string>()
       };
 
@@ -594,7 +677,8 @@ export class ClusterHttp2Transport {
         event_name: 'session_connected',
         session_id,
         details: {
-          remote_address: session_state.remote_address
+          remote_address: session_state.remote_address,
+          mtls_authenticated: Boolean(mtls_identity)
         }
       });
 
@@ -657,30 +741,16 @@ export class ClusterHttp2Transport {
     this.session_state_by_session.clear();
   }
 
-  private createHttp2Server(): Http2Server | Http2SecureServer {
-    if (this.tls_config.mode !== 'required') {
-      return createServer();
-    }
+  private createHttp2Server(): Http2SecureServer {
+    const validated_tls_server_config = ValidateTlsServerConfig({
+      tls_server_config: this.tls_config as cluster_tls_server_config_t
+    });
 
-    if (
-      typeof this.tls_config.key_pem !== 'string' ||
-      typeof this.tls_config.cert_pem !== 'string'
-    ) {
-      throw new Error(
-        'TLS mode "required" needs key_pem and cert_pem to be configured.'
-      );
-    }
-
-    const secure_server_options: SecureServerOptions = {
-      key: this.tls_config.key_pem,
-      cert: this.tls_config.cert_pem,
-      ca: this.tls_config.ca_pem_list,
-      allowHTTP1: false,
-      requestCert: this.tls_config.request_client_cert ?? true,
-      rejectUnauthorized: this.tls_config.reject_unauthorized_client_cert ?? true
-    };
-
-    return createSecureServer(secure_server_options);
+    return createSecureServer(
+      BuildTlsServerOptions({
+        tls_server_config: validated_tls_server_config
+      })
+    );
   }
 
   private async handleHttp2Request(params: {
@@ -843,23 +913,37 @@ export class ClusterHttp2Transport {
     const trusted_identity_result = await this.resolveTrustedIdentity({
       session_state,
       headers: request.headers,
-      request_kind: 'call',
-      fallback_identity: {
-        subject: call_request.caller_identity.subject,
-        tenant_id: call_request.caller_identity.tenant_id,
-        scopes: [...call_request.caller_identity.scopes],
-        signed_claims: call_request.caller_identity.signed_claims
-      }
+      request_kind: 'call'
     });
 
-    const effective_call_request = trusted_identity_result.ok
-      ? ApplyTrustedIdentityToCallRequest({
+    if (!trusted_identity_result.ok) {
+      await this.sendCallResponse({
+        response,
+        call_response: this.buildCallAuthFailedResponse({
           request: call_request,
-          trusted_identity: trusted_identity_result.identity
+          auth_error_message: trusted_identity_result.message,
+          auth_error_details: trusted_identity_result.details
         })
-      : BuildUnauthenticatedCallRequest({
-          request: call_request
-        });
+      });
+
+      this.emitTransportEvent({
+        event_name: 'request_failed',
+        session_id: session_state?.session_id,
+        request_id: call_request.request_id,
+        details: {
+          reason: 'authentication_failed',
+          auth_error_message: trusted_identity_result.message,
+          auth_error_details: trusted_identity_result.details,
+          terminal_error_code: 'AUTH_FAILED'
+        }
+      });
+      return;
+    }
+
+    const effective_call_request = ApplyTrustedIdentityToCallRequest({
+      request: call_request,
+      trusted_identity: trusted_identity_result.identity
+    });
 
     const request_state = this.registerInFlightRequest({
       request_id: effective_call_request.request_id,
@@ -900,33 +984,15 @@ export class ClusterHttp2Transport {
         call_response
       });
 
-      if (trusted_identity_result.ok) {
-        this.emitTransportEvent({
-          event_name: 'request_completed',
-          session_id: session_state?.session_id,
-          request_id: effective_call_request.request_id,
-          details: {
-            function_name: effective_call_request.function_name,
-            terminal_message_type: call_response.terminal_message.message_type
-          }
-        });
-      } else {
-        this.emitTransportEvent({
-          event_name: 'request_failed',
-          session_id: session_state?.session_id,
-          request_id: effective_call_request.request_id,
-          details: {
-            reason: 'authentication_failed',
-            auth_error_message: trusted_identity_result.message,
-            auth_error_details: trusted_identity_result.details,
-            terminal_error_code:
-              call_response.terminal_message.message_type ===
-              'cluster_call_response_error'
-                ? call_response.terminal_message.error.code
-                : undefined
-          }
-        });
-      }
+      this.emitTransportEvent({
+        event_name: 'request_completed',
+        session_id: session_state?.session_id,
+        request_id: effective_call_request.request_id,
+        details: {
+          function_name: effective_call_request.function_name,
+          terminal_message_type: call_response.terminal_message.message_type
+        }
+      });
     } catch (error) {
       request_completed = true;
       this.completeInFlightRequest({
@@ -974,19 +1040,14 @@ export class ClusterHttp2Transport {
     const trusted_identity_result = await this.resolveTrustedIdentity({
       session_state,
       headers: request.headers,
-      request_kind: 'mutation',
-      fallback_identity: {
-        subject: mutation_request.auth_context.subject,
-        tenant_id: mutation_request.auth_context.tenant_id,
-        scopes: [...mutation_request.auth_context.capability_claims],
-        signed_claims: mutation_request.auth_context.signed_claims,
-        environment: mutation_request.auth_context.environment
-      }
+      request_kind: 'mutation'
     });
 
     if (!trusted_identity_result.ok) {
       const auth_failed_response = this.buildMutationAuthFailedResponse({
-        request: mutation_request
+        request: mutation_request,
+        auth_error_message: trusted_identity_result.message,
+        auth_error_details: trusted_identity_result.details
       });
 
       await this.sendMutationResponse({
@@ -1021,7 +1082,11 @@ export class ClusterHttp2Transport {
       typeof token_id !== 'string'
     ) {
       const auth_failed_response = this.buildMutationAuthFailedResponse({
-        request: mutation_request
+        request: mutation_request,
+        auth_error_details: {
+          secure_error_code: 'AUTH_TOKEN_INVALID',
+          reason: 'missing_token_id_for_replay_protection'
+        }
       });
 
       await this.sendMutationResponse({
@@ -1047,7 +1112,11 @@ export class ClusterHttp2Transport {
 
       if (!replay_result.ok) {
         const auth_failed_response = this.buildMutationAuthFailedResponse({
-          request: mutation_request
+          request: mutation_request,
+          auth_error_details: {
+            secure_error_code: 'AUTH_REPLAY_DETECTED',
+            reason: 'replay_detected'
+          }
         });
 
         await this.sendMutationResponse({
@@ -1123,9 +1192,8 @@ export class ClusterHttp2Transport {
     session_state: cluster_http2_session_state_t | undefined;
     headers: IncomingHttpHeaders;
     request_kind: 'call' | 'mutation';
-    fallback_identity: cluster_http2_session_identity_t;
   }): Promise<cluster_http2_authenticate_request_result_t> {
-    const { session_state, headers, fallback_identity } = params;
+    const { session_state, headers } = params;
 
     const now_unix_ms = Date.now();
 
@@ -1140,14 +1208,6 @@ export class ClusterHttp2Transport {
       };
     }
 
-    const upstream_tls_result = this.validateUpstreamTlsAssertion({
-      headers
-    });
-
-    if (!upstream_tls_result.ok) {
-      return upstream_tls_result;
-    }
-
     let identity_result: cluster_http2_authenticate_request_result_t;
 
     const token_validation_config = this.token_validator.getTokenValidationConfig();
@@ -1158,11 +1218,13 @@ export class ClusterHttp2Transport {
       });
 
       if (!token_result.ok) {
+        this.transport_metrics_base.token_validation_failures_total += 1;
         return {
           ok: false,
           message: 'Authentication failed.',
           details: {
-            reason: token_result.details.reason
+            reason: token_result.details.reason,
+            secure_error_code: 'AUTH_TOKEN_INVALID'
           }
         };
       }
@@ -1177,10 +1239,20 @@ export class ClusterHttp2Transport {
         headers,
         existing_identity: session_state?.identity
       });
-    } else {
+    } else if (session_state?.mtls_identity) {
       identity_result = {
         ok: true,
-        identity: fallback_identity
+        identity: session_state.mtls_identity
+      };
+    } else {
+      this.transport_metrics_base.mtls_auth_failures_total += 1;
+      identity_result = {
+        ok: false,
+        message: 'Authentication failed.',
+        details: {
+          reason: 'mtls_identity_missing_or_invalid',
+          secure_error_code: 'AUTH_MTLS_REQUIRED'
+        }
       };
     }
 
@@ -1196,11 +1268,13 @@ export class ClusterHttp2Transport {
       });
 
       if (!hook_result.ok) {
+        this.transport_metrics_base.mtls_auth_failures_total += 1;
         return {
           ok: false,
           message: 'Authentication failed.',
           details: {
-            reason: 'authenticate_hook_denied'
+            reason: 'authenticate_hook_denied',
+            secure_error_code: 'AUTH_CERT_INVALID'
           }
         };
       }
@@ -1228,65 +1302,6 @@ export class ClusterHttp2Transport {
     }
 
     return identity_result;
-  }
-
-  private validateUpstreamTlsAssertion(params: {
-    headers: IncomingHttpHeaders;
-  }): cluster_http2_authenticate_request_result_t {
-    const { headers } = params;
-
-    if (this.tls_config.mode !== 'terminated_upstream') {
-      return {
-        ok: true,
-        identity: {
-          subject: 'upstream_tls_not_required',
-          tenant_id: 'upstream_tls_not_required',
-          scopes: [],
-          signed_claims: ''
-        }
-      };
-    }
-
-    const assertion_header_name = this.tls_config.terminated_upstream_assertion_header_name;
-    const assertion_header_value = this.tls_config.terminated_upstream_assertion_header_value;
-
-    if (
-      typeof assertion_header_name !== 'string' ||
-      typeof assertion_header_value !== 'string'
-    ) {
-      return {
-        ok: false,
-        message: 'Upstream TLS assertion is not configured.',
-        details: {
-          reason: 'upstream_tls_assertion_not_configured'
-        }
-      };
-    }
-
-    const header_value = headers[assertion_header_name.toLowerCase()];
-
-    if (
-      (typeof header_value === 'string' && header_value === assertion_header_value) ||
-      (Array.isArray(header_value) && header_value.includes(assertion_header_value))
-    ) {
-      return {
-        ok: true,
-        identity: {
-          subject: 'upstream_tls_verified',
-          tenant_id: 'upstream_tls_verified',
-          scopes: [],
-          signed_claims: ''
-        }
-      };
-    }
-
-    return {
-      ok: false,
-      message: 'Upstream TLS assertion failed.',
-      details: {
-        reason: 'upstream_tls_assertion_failed'
-      }
-    };
   }
 
   private registerInFlightRequest(params: {
@@ -1526,6 +1541,8 @@ export class ClusterHttp2Transport {
         if (reason === 'authentication_failed') {
           this.transport_metrics_base.auth_failed_total += 1;
           auth_failure_recorded = true;
+        } else if (reason === 'tls_handshake_failed') {
+          this.transport_metrics_base.tls_handshake_failures_total += 1;
         } else if (reason === 'replay_detected') {
           this.transport_metrics_base.replay_rejected_total += 1;
         }
@@ -1545,9 +1562,27 @@ export class ClusterHttp2Transport {
         if (
           !auth_failure_recorded &&
           (terminal_error_code === 'AUTH_FAILED' ||
+            terminal_error_code === 'AUTH_TOKEN_INVALID' ||
+            terminal_error_code === 'AUTH_MTLS_REQUIRED' ||
+            terminal_error_code === 'AUTH_CERT_INVALID' ||
             terminal_error_code === 'ADMIN_AUTH_FAILED')
         ) {
           this.transport_metrics_base.auth_failed_total += 1;
+        }
+
+        if (terminal_error_code === 'AUTH_TOKEN_INVALID') {
+          this.transport_metrics_base.token_validation_failures_total += 1;
+        }
+
+        if (
+          terminal_error_code === 'AUTH_MTLS_REQUIRED' ||
+          terminal_error_code === 'AUTH_CERT_INVALID'
+        ) {
+          this.transport_metrics_base.mtls_auth_failures_total += 1;
+        }
+
+        if (terminal_error_code === 'AUTH_REPLAY_DETECTED') {
+          this.transport_metrics_base.replay_rejected_total += 1;
         }
       }
     }
@@ -1568,10 +1603,66 @@ export class ClusterHttp2Transport {
     }
   }
 
+  private buildCallAuthFailedResponse(params: {
+    request: cluster_call_request_message_i;
+    auth_error_message: string;
+    auth_error_details?: Record<string, unknown>;
+  }): handle_cluster_call_response_t {
+    const now_unix_ms = Date.now();
+    const { request, auth_error_message, auth_error_details } = params;
+    const secure_error_code =
+      typeof auth_error_details?.secure_error_code === 'string'
+        ? auth_error_details.secure_error_code
+        : null;
+    const call_error_code: cluster_protocol_error_code_t =
+      secure_error_code === 'AUTH_TLS_REQUIRED' ||
+      secure_error_code === 'AUTH_MTLS_REQUIRED' ||
+      secure_error_code === 'AUTH_CERT_INVALID' ||
+      secure_error_code === 'AUTH_TOKEN_INVALID' ||
+      secure_error_code === 'AUTH_REPLAY_DETECTED'
+        ? secure_error_code
+        : 'AUTH_FAILED';
+
+    return {
+      ack: {
+        protocol_version: 1,
+        message_type: 'cluster_call_ack',
+        timestamp_unix_ms: now_unix_ms,
+        request_id: request.request_id,
+        attempt_index: request.attempt_index,
+        node_id: this.node_id,
+        accepted: false,
+        queue_position: 0,
+        estimated_start_delay_ms: 0
+      },
+      terminal_message: {
+        protocol_version: 1,
+        message_type: 'cluster_call_response_error',
+        timestamp_unix_ms: now_unix_ms,
+        request_id: request.request_id,
+        attempt_index: request.attempt_index,
+        node_id: this.node_id,
+        error: {
+          code: call_error_code,
+          message: auth_error_message,
+          retryable: false,
+          unknown_outcome: false,
+          details: auth_error_details ?? {}
+        },
+        timing: {
+          gateway_received_unix_ms: request.timestamp_unix_ms,
+          last_attempt_started_unix_ms: now_unix_ms
+        }
+      }
+    };
+  }
+
   private buildMutationAuthFailedResponse(params: {
     request: cluster_admin_mutation_request_message_i;
+    auth_error_message?: string;
+    auth_error_details?: Record<string, unknown>;
   }): handle_cluster_admin_mutation_response_t {
-    const { request } = params;
+    const { request, auth_error_message, auth_error_details } = params;
     const now_unix_ms = Date.now();
 
     return {
@@ -1594,10 +1685,10 @@ export class ClusterHttp2Transport {
         request_id: request.request_id,
         error: {
           code: 'ADMIN_AUTH_FAILED',
-          message: 'Authentication failed for admin mutation request.',
+          message: auth_error_message ?? 'Authentication failed for admin mutation request.',
           retryable: false,
           unknown_outcome: false,
-          details: {}
+          details: auth_error_details ?? {}
         }
       }
     };

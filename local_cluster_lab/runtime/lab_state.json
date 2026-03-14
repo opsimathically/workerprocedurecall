@@ -1,0 +1,21 @@
+{
+  "profile": "minimal",
+  "started_unix_ms": 1772525425206,
+  "service_process_state_by_id": {
+    "node_east": {
+      "service_id": "node_east",
+      "role": "node_agent",
+      "profile": "minimal",
+      "pid": 201990,
+      "admin_base_url": "https://localhost:8201",
+      "log_file_path": "/home/tourist/github_resume_projects/workerprocedurecall/local_cluster_lab/logs/node_east.log",
+      "endpoint": {
+        "host": "localhost",
+        "port": 7201,
+        "request_path": "/wpc/cluster/protocol",
+        "tls_mode": "required"
+      },
+      "started_unix_ms": 1772525425209
+    }
+  }
+}

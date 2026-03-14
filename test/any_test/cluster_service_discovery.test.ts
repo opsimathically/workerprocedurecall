@@ -8,6 +8,7 @@ import {
   type cluster_call_request_message_i,
   type handle_cluster_call_response_t
 } from '../../src/index';
+import { BuildSecureNodeTransportSecurity } from '../fixtures/secure_transport_config';
 
 function BuildAllowAllCallPolicyList(): {
   policy_id: string;
@@ -149,7 +150,7 @@ test('service discovery store supports register heartbeat capability query and r
         host: '127.0.0.1',
         port: 9001,
         request_path: '/wpc/cluster/protocol',
-        tls_mode: 'disabled'
+        tls_mode: 'required'
       },
       labels: {
         env: 'test',
@@ -236,7 +237,7 @@ test('service discovery store expires stale nodes deterministically', function (
         host: '127.0.0.1',
         port: 9002,
         request_path: '/wpc/cluster/protocol',
-        tls_mode: 'disabled'
+        tls_mode: 'required'
       }
     },
     status: 'ready',
@@ -289,7 +290,9 @@ test('node agent auto-registers in discovery, publishes capabilities, and deregi
     node_id: 'node_phase14_discovery_local',
     worker_start_count: 1,
     transport: {
-      authenticate_request: BuildPermissiveAuthenticateRequest()
+      host: 'localhost',
+      authenticate_request: BuildPermissiveAuthenticateRequest(),
+      security: BuildSecureNodeTransportSecurity()
     },
     discovery: {
       enabled: true,
@@ -387,7 +390,9 @@ test('routing uses discovery state and reroutes after discovered node changes', 
     workerprocedurecall: workerprocedurecall_gateway,
     node_id: 'node_phase14_gateway',
     transport: {
-      authenticate_request: BuildPermissiveAuthenticateRequest()
+      host: 'localhost',
+      authenticate_request: BuildPermissiveAuthenticateRequest(),
+      security: BuildSecureNodeTransportSecurity()
     },
     discovery: {
       enabled: true,
@@ -404,7 +409,9 @@ test('routing uses discovery state and reroutes after discovered node changes', 
     node_id: 'node_phase14_b',
     worker_start_count: 1,
     transport: {
-      authenticate_request: BuildPermissiveAuthenticateRequest()
+      host: 'localhost',
+      authenticate_request: BuildPermissiveAuthenticateRequest(),
+      security: BuildSecureNodeTransportSecurity()
     },
     discovery: {
       enabled: true,
@@ -421,7 +428,9 @@ test('routing uses discovery state and reroutes after discovered node changes', 
     node_id: 'node_phase14_c',
     worker_start_count: 1,
     transport: {
-      authenticate_request: BuildPermissiveAuthenticateRequest()
+      host: 'localhost',
+      authenticate_request: BuildPermissiveAuthenticateRequest(),
+      security: BuildSecureNodeTransportSecurity()
     },
     discovery: {
       enabled: true,
@@ -507,7 +516,7 @@ test('routing uses discovery state and reroutes after discovered node changes', 
           host: '127.0.0.1',
           port: 65530,
           request_path: '/wpc/cluster/protocol',
-          tls_mode: 'disabled'
+          tls_mode: 'required'
         }
       },
       status: 'ready',
@@ -591,7 +600,9 @@ test('discovery disabled mode preserves manual node registration behavior', asyn
     workerprocedurecall,
     node_id: 'node_phase14_manual_gateway',
     transport: {
-      authenticate_request: BuildPermissiveAuthenticateRequest()
+      host: 'localhost',
+      authenticate_request: BuildPermissiveAuthenticateRequest(),
+      security: BuildSecureNodeTransportSecurity()
     },
     discovery: {
       enabled: false
@@ -651,7 +662,9 @@ test('discovery update staleness races do not crash call handling path', async f
     node_id: 'node_phase14_race_gateway',
     worker_start_count: 1,
     transport: {
-      authenticate_request: BuildPermissiveAuthenticateRequest()
+      host: 'localhost',
+      authenticate_request: BuildPermissiveAuthenticateRequest(),
+      security: BuildSecureNodeTransportSecurity()
     },
     discovery: {
       enabled: true,
@@ -668,7 +681,9 @@ test('discovery update staleness races do not crash call handling path', async f
     node_id: 'node_phase14_race_c',
     worker_start_count: 1,
     transport: {
-      authenticate_request: BuildPermissiveAuthenticateRequest()
+      host: 'localhost',
+      authenticate_request: BuildPermissiveAuthenticateRequest(),
+      security: BuildSecureNodeTransportSecurity()
     },
     discovery: {
       enabled: true,

@@ -25,7 +25,7 @@ export type cluster_service_discovery_node_identity_t = {
     host: string;
     port: number;
     request_path: string;
-    tls_mode: 'disabled' | 'required' | 'terminated_upstream';
+    tls_mode: 'required';
   };
   labels?: Record<string, string>;
   zones?: string[];
@@ -249,14 +249,8 @@ function ValidateNodeIdentity(params: {
     );
   }
 
-  if (
-    address.tls_mode !== 'disabled' &&
-    address.tls_mode !== 'required' &&
-    address.tls_mode !== 'terminated_upstream'
-  ) {
-    throw new Error(
-      'node_identity.address.tls_mode must be one of disabled|required|terminated_upstream.'
-    );
+  if (address.tls_mode !== 'required') {
+    throw new Error('node_identity.address.tls_mode must be required.');
   }
 }
 

@@ -1,4 +1,10 @@
 import { connect, type ClientHttp2Session } from 'node:http2';
+import {
+  BuildHttpsAuthority,
+  BuildTlsClientConnectOptions,
+  ValidateTlsClientConfig,
+  type cluster_tls_client_config_t
+} from '../clustertransport/ClusterTlsSecurity.class';
 
 import {
   ClusterInMemoryServiceDiscoveryStore,
@@ -35,14 +41,14 @@ export type cluster_remote_service_discovery_endpoint_t = {
   host: string;
   port: number;
   request_path?: string;
-  tls_mode?: 'disabled' | 'required';
+  tls_mode?: 'required';
 };
 
 export type cluster_remote_service_discovery_store_adapter_constructor_params_t = {
   host?: string;
   port?: number;
   request_path?: string;
-  tls_mode?: 'disabled' | 'required';
+  tls_mode?: 'required';
   endpoint_list?: cluster_remote_service_discovery_endpoint_t[];
   request_timeout_ms?: number;
   synchronization_interval_ms?: number;
@@ -53,6 +59,7 @@ export type cluster_remote_service_discovery_store_adapter_constructor_params_t 
   auth_headers?: Record<string, string>;
   auth_headers_provider?: cluster_remote_service_discovery_auth_headers_provider_t;
   prefer_leader_reads?: boolean;
+  transport_security?: cluster_tls_client_config_t;
 };
 
 type cluster_remote_discovery_pending_operation_t = {
@@ -80,7 +87,7 @@ type cluster_remote_discovery_endpoint_state_t = {
   host: string;
   port: number;
   request_path: string;
-  tls_mode: 'disabled' | 'required';
+  tls_mode: 'required';
   failure_count: number;
   last_failure_unix_ms: number | null;
   cooldown_until_unix_ms: number;
@@ -102,10 +109,16 @@ function BuildRequestPath(params: { request_path: string | undefined }): string 
 function BuildTransportAuthority(params: {
   host: string;
   port: number;
-  tls_mode: 'disabled' | 'required';
+  tls_mode: 'required';
 }): string {
-  const scheme = params.tls_mode === 'required' ? 'https' : 'http';
-  return `${scheme}://${params.host}:${params.port}`;
+  if (params.tls_mode !== 'required') {
+    throw new Error('Only tls_mode="required" is supported.');
+  }
+
+  return BuildHttpsAuthority({
+    host: params.host,
+    port: params.port
+  });
 }
 
 function NormalizeHeaders(params: {
@@ -167,6 +180,7 @@ export class ClusterRemoteServiceDiscoveryStoreAdapter
   private readonly auth_headers_provider:
     | cluster_remote_service_discovery_auth_headers_provider_t
     | undefined;
+  private readonly transport_security: cluster_tls_client_config_t;
 
   private endpoint_state_list: cluster_remote_discovery_endpoint_state_t[] = [];
   private known_leader_daemon_id: string | null = null;
@@ -204,6 +218,10 @@ export class ClusterRemoteServiceDiscoveryStoreAdapter
       headers: params.auth_headers
     });
     this.auth_headers_provider = params.auth_headers_provider;
+    this.transport_security = ValidateTlsClientConfig({
+      tls_client_config: params.transport_security,
+      field_prefix: 'cluster_remote_service_discovery.transport_security'
+    });
 
     const endpoint_list_from_params = Array.isArray(params.endpoint_list)
       ? params.endpoint_list
@@ -252,7 +270,7 @@ export class ClusterRemoteServiceDiscoveryStoreAdapter
         host: endpoint.host,
         port: endpoint.port,
         request_path,
-        tls_mode: endpoint.tls_mode ?? 'disabled',
+        tls_mode: endpoint.tls_mode ?? 'required',
         failure_count: existing_endpoint_state?.failure_count ?? 0,
         last_failure_unix_ms: existing_endpoint_state?.last_failure_unix_ms ?? null,
         cooldown_until_unix_ms: existing_endpoint_state?.cooldown_until_unix_ms ?? 0,
@@ -812,7 +830,7 @@ export class ClusterRemoteServiceDiscoveryStoreAdapter
               typeof redirect_endpoint.host === 'string' &&
               typeof redirect_endpoint.port === 'number' &&
               typeof redirect_endpoint.request_path === 'string' &&
-              (redirect_endpoint.tls_mode === 'disabled' || redirect_endpoint.tls_mode === 'required')
+              redirect_endpoint.tls_mode === 'required'
             ) {
               this.addOrUpdateRedirectEndpoint({
                 redirect_endpoint
@@ -856,6 +874,9 @@ export class ClusterRemoteServiceDiscoveryStoreAdapter
           host: params.endpoint_state.host,
           port: params.endpoint_state.port,
           tls_mode: params.endpoint_state.tls_mode
+        }),
+        BuildTlsClientConnectOptions({
+          tls_client_config: this.transport_security
         })
       );
 

@@ -9,6 +9,10 @@ import {
   type cluster_call_request_message_i,
   type handle_cluster_call_response_t
 } from '../../src/index';
+import {
+  BuildSecureClientTlsConfig,
+  BuildSecureNodeTransportSecurity
+} from '../fixtures/secure_transport_config';
 
 let phase13_sequence_number = 20_000;
 
@@ -356,6 +360,7 @@ test('phase13 chaos: network partition simulation has deterministic client error
     node_id: 'node_local_phase13_partition',
     worker_start_count: 1,
     transport: {
+      security: BuildSecureNodeTransportSecurity(),
       authenticate_request: function (params) {
         const authorization_value = params.headers.authorization;
         const authorization = typeof authorization_value === 'string'
@@ -427,7 +432,8 @@ test('phase13 chaos: network partition simulation has deterministic client error
         max_attempts: 2,
         backoff_ms: 50
       },
-      default_call_timeout_ms: 500
+      default_call_timeout_ms: 500,
+      transport_security: BuildSecureClientTlsConfig()
     });
 
     await cluster_client.connect();
@@ -487,6 +493,7 @@ test('phase13 stress: reconnect storms remain stable and observable', async func
     node_id: 'node_local_phase13_storm',
     worker_start_count: 1,
     transport: {
+      security: BuildSecureNodeTransportSecurity(),
       authenticate_request: function () {
         return {
           ok: true,
@@ -547,7 +554,8 @@ test('phase13 stress: reconnect storms remain stable and observable', async func
               max_attempts: 1,
               backoff_ms: 10
             },
-            default_call_timeout_ms: 500
+            default_call_timeout_ms: 500,
+            transport_security: BuildSecureClientTlsConfig()
           });
 
           try {

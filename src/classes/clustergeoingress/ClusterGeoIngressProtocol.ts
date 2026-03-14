@@ -77,7 +77,7 @@ export type cluster_geo_ingress_endpoint_t = {
   host: string;
   port: number;
   request_path: string;
-  tls_mode: 'disabled' | 'required' | 'terminated_upstream';
+  tls_mode: 'required';
 };
 
 export type cluster_geo_ingress_region_record_t = {

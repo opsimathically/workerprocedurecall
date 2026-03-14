@@ -1,4 +1,10 @@
 import { connect, type ClientHttp2Session } from 'node:http2';
+import {
+  BuildHttpsAuthority,
+  BuildTlsClientConnectOptions,
+  ValidateTlsClientConfig,
+  type cluster_tls_client_config_t
+} from '../clustertransport/ClusterTlsSecurity.class';
 
 import type {
   cluster_geo_ingress_global_routing_policy_snapshot_t,
@@ -24,7 +30,7 @@ export type cluster_geo_ingress_adapter_endpoint_t = {
   host: string;
   port: number;
   request_path?: string;
-  tls_mode?: 'disabled' | 'required';
+  tls_mode?: 'required';
 };
 
 export type cluster_geo_ingress_adapter_constructor_params_t = {
@@ -37,6 +43,7 @@ export type cluster_geo_ingress_adapter_constructor_params_t = {
   max_request_attempts?: number;
   auth_headers?: Record<string, string>;
   auth_headers_provider?: cluster_geo_ingress_adapter_auth_headers_provider_t;
+  transport_security?: cluster_tls_client_config_t;
 };
 
 type cluster_geo_ingress_adapter_endpoint_state_t = {
@@ -44,7 +51,7 @@ type cluster_geo_ingress_adapter_endpoint_state_t = {
   host: string;
   port: number;
   request_path: string;
-  tls_mode: 'disabled' | 'required';
+  tls_mode: 'required';
   failure_count: number;
   last_failure_unix_ms: number | null;
   cooldown_until_unix_ms: number;
@@ -70,7 +77,7 @@ export type cluster_geo_ingress_adapter_snapshot_t = {
     host: string;
     port: number;
     request_path: string;
-    tls_mode: 'disabled' | 'required';
+    tls_mode: 'required';
     failure_count: number;
     cooldown_until_unix_ms: number;
     last_success_unix_ms: number | null;
@@ -93,10 +100,16 @@ function BuildRequestPath(params: { request_path: string | undefined }): string 
 function BuildTransportAuthority(params: {
   host: string;
   port: number;
-  tls_mode: 'disabled' | 'required';
+  tls_mode: 'required';
 }): string {
-  const scheme = params.tls_mode === 'required' ? 'https' : 'http';
-  return `${scheme}://${params.host}:${params.port}`;
+  if (params.tls_mode !== 'required') {
+    throw new Error('Only tls_mode="required" is supported.');
+  }
+
+  return BuildHttpsAuthority({
+    host: params.host,
+    port: params.port
+  });
 }
 
 function NormalizeHeaders(params: {
@@ -151,6 +164,7 @@ export class ClusterGeoIngressAdapter {
   private readonly auth_headers_provider:
     | cluster_geo_ingress_adapter_auth_headers_provider_t
     | undefined;
+  private readonly transport_security: cluster_tls_client_config_t;
 
   private next_request_index = 1;
 
@@ -174,6 +188,10 @@ export class ClusterGeoIngressAdapter {
       headers: params.auth_headers
     });
     this.auth_headers_provider = params.auth_headers_provider;
+    this.transport_security = ValidateTlsClientConfig({
+      tls_client_config: params.transport_security,
+      field_prefix: 'cluster_geo_ingress_adapter.transport_security'
+    });
 
     const endpoint_list = Array.isArray(params.endpoint_list)
       ? params.endpoint_list
@@ -210,7 +228,7 @@ export class ClusterGeoIngressAdapter {
         host: endpoint.host,
         port: endpoint.port,
         request_path,
-        tls_mode: endpoint.tls_mode ?? 'disabled',
+        tls_mode: endpoint.tls_mode ?? 'required',
         failure_count: existing_endpoint_state?.failure_count ?? 0,
         last_failure_unix_ms: existing_endpoint_state?.last_failure_unix_ms ?? null,
         cooldown_until_unix_ms: existing_endpoint_state?.cooldown_until_unix_ms ?? 0,
@@ -252,7 +270,7 @@ export class ClusterGeoIngressAdapter {
       host: string;
       port: number;
       request_path: string;
-      tls_mode: 'disabled' | 'required' | 'terminated_upstream';
+      tls_mode: 'required';
     };
     health_status: 'ready' | 'overloaded' | 'degraded';
     ingress_version: string;
@@ -742,7 +760,12 @@ export class ClusterGeoIngressAdapter {
     request_path: string;
     request_body: string;
   }): Promise<string> {
-    const client_session: ClientHttp2Session = connect(params.authority);
+    const client_session: ClientHttp2Session = connect(
+      params.authority,
+      BuildTlsClientConnectOptions({
+        tls_client_config: this.transport_security
+      })
+    );
 
     return await new Promise<string>(async (resolve, reject): Promise<void> => {
       const chunk_list: Buffer[] = [];

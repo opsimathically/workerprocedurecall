@@ -2,6 +2,12 @@ import {
   connect,
   type ClientHttp2Session
 } from 'node:http2';
+import {
+  BuildHttpsAuthority,
+  BuildTlsClientConnectOptions,
+  ValidateTlsClientConfig,
+  type cluster_tls_client_config_t
+} from '../clustertransport/ClusterTlsSecurity.class';
 
 import type {
   cluster_call_ack_message_i,
@@ -27,15 +33,22 @@ export type cluster_ingress_forwarder_constructor_params_t = {
   request_timeout_ms?: number;
   static_request_headers?: Record<string, string>;
   auth_headers_provider?: cluster_ingress_forwarder_auth_headers_provider_t;
+  transport_security?: cluster_tls_client_config_t;
 };
 
 function BuildTransportAuthority(params: {
   host: string;
   port: number;
-  tls_mode: 'disabled' | 'required' | 'terminated_upstream';
+  tls_mode: 'required';
 }): string {
-  const scheme = params.tls_mode === 'required' ? 'https' : 'http';
-  return `${scheme}://${params.host}:${params.port}`;
+  if (params.tls_mode !== 'required') {
+    throw new Error('Only tls_mode="required" is supported for ingress forwarding.');
+  }
+
+  return BuildHttpsAuthority({
+    host: params.host,
+    port: params.port
+  });
 }
 
 function NormalizeHeaders(params: {
@@ -72,6 +85,7 @@ export class ClusterIngressForwarder {
   private readonly auth_headers_provider:
     | cluster_ingress_forwarder_auth_headers_provider_t
     | undefined;
+  private readonly transport_security: cluster_tls_client_config_t;
 
   constructor(params: cluster_ingress_forwarder_constructor_params_t = {}) {
     this.request_timeout_ms = params.request_timeout_ms ?? 5_000;
@@ -79,6 +93,10 @@ export class ClusterIngressForwarder {
       headers: params.static_request_headers
     });
     this.auth_headers_provider = params.auth_headers_provider;
+    this.transport_security = ValidateTlsClientConfig({
+      tls_client_config: params.transport_security,
+      field_prefix: 'cluster_ingress_forwarder.transport_security'
+    });
   }
 
   async dispatchWithFailover(params: {
@@ -317,7 +335,12 @@ export class ClusterIngressForwarder {
       port: params.candidate.endpoint.port,
       tls_mode: params.candidate.endpoint.tls_mode
     });
-    const client_session: ClientHttp2Session = connect(authority);
+    const client_session: ClientHttp2Session = connect(
+      authority,
+      BuildTlsClientConnectOptions({
+        tls_client_config: this.transport_security
+      })
+    );
     client_session.on('error', (): void => {
       // request stream handles operation errors.
     });

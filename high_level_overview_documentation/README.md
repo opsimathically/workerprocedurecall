@@ -4,6 +4,7 @@
 This library can run remote procedure calls in worker threads locally, expose those calls over network transport, and apply routing/failover across registered nodes. It also supports an authenticated admin mutation plane and local shared-memory primitives.
 
 > **Implemented Today**
+> - Secure-only network posture (TLS + mTLS required; no plaintext fallback).
 > - Client SDK (`ClusterClient`) for connect/call/adminMutate/close.
 > - Network transport (`ClusterHttp2Transport`) and node agent (`ClusterNodeAgent`).
 > - Built-in ingress front door (`ClusterIngressBalancerService`) for multi-gateway dispatch.
@@ -33,6 +34,7 @@ This library can run remote procedure calls in worker threads locally, expose th
 ## What You Can Do Right Now
 - [x] Run worker procedures locally across multiple threads.
 - [x] Expose worker procedures over HTTP/2 transport.
+- [x] Enforce encrypted + authenticated network calls only (secure-only transport).
 - [x] Connect from remote clients and invoke procedures.
 - [x] Route calls through a single built-in ingress endpoint with health/capability-aware dispatch.
 - [x] Route to target/affinity/auto-selected nodes.

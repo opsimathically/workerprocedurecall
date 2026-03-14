@@ -3,6 +3,11 @@ export type cluster_protocol_supported_version_t = 1;
 export type cluster_protocol_error_code_t =
   | 'PROTOCOL_VALIDATION_FAILED'
   | 'AUTH_FAILED'
+  | 'AUTH_TLS_REQUIRED'
+  | 'AUTH_MTLS_REQUIRED'
+  | 'AUTH_CERT_INVALID'
+  | 'AUTH_TOKEN_INVALID'
+  | 'AUTH_REPLAY_DETECTED'
   | 'FORBIDDEN_FUNCTION'
   | 'NO_CAPABLE_NODE'
   | 'NODE_OVERLOADED_RETRYABLE'

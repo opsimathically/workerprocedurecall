@@ -25,7 +25,7 @@ export type cluster_service_discovery_redirect_endpoint_t = {
   host: string;
   port: number;
   request_path: string;
-  tls_mode: 'disabled' | 'required';
+  tls_mode: 'required';
 };
 
 export type cluster_service_discovery_protocol_request_message_type_t =

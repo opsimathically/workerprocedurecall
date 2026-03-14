@@ -360,7 +360,7 @@ test('phase10 rejects invalid, expired, wrong issuer, and wrong audience tokens 
           },
           function (error: unknown): boolean {
             assert(error instanceof ClusterClientError);
-            assert.equal(error.code, 'AUTH_FAILED');
+            assert.equal(error.code, 'AUTH_TOKEN_INVALID');
             return true;
           }
         );
@@ -571,7 +571,7 @@ test('phase10 supports token key rotation hooks with deterministic auth behavior
         },
         function (error: unknown): boolean {
           assert(error instanceof ClusterClientError);
-          assert.equal(error.code, 'AUTH_FAILED');
+          assert.equal(error.code, 'AUTH_TOKEN_INVALID');
           return true;
         }
       );

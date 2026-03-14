@@ -40,7 +40,7 @@ export type ingress_balancer_target_record_t = {
     host: string;
     port: number;
     request_path: string;
-    tls_mode: 'disabled' | 'required' | 'terminated_upstream';
+    tls_mode: 'required';
   };
   source: ingress_balancer_target_source_t;
   health_state: ingress_balancer_target_health_state_t;

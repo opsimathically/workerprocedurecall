@@ -7,6 +7,12 @@ import {
   ParseClusterCallResponseErrorMessage,
   ParseClusterCallResponseSuccessMessage
 } from '../clusterprotocol/ClusterProtocolValidators';
+import {
+  BuildHttpsAuthority,
+  BuildTlsClientConnectOptions,
+  ValidateTlsClientConfig,
+  type cluster_tls_client_config_t
+} from '../clustertransport/ClusterTlsSecurity.class';
 import type {
   cluster_admin_mutation_error_message_i,
   cluster_admin_mutation_request_message_i,
@@ -52,14 +58,9 @@ export type cluster_client_constructor_params_t = {
   default_call_timeout_ms?: number;
   retry_policy?: Partial<cluster_client_retry_policy_t>;
   reconnect_policy?: Partial<cluster_client_reconnect_policy_t>;
-  transport_security?: {
+  transport_security?: (cluster_tls_client_config_t & {
     use_tls?: boolean;
-    ca_pem_list?: string[];
-    client_cert_pem?: string;
-    client_key_pem?: string;
-    reject_unauthorized?: boolean;
-    servername?: string;
-  };
+  });
 };
 
 export type cluster_client_error_code_t =
@@ -291,14 +292,7 @@ export class ClusterClient {
   private readonly default_call_timeout_ms: number;
   private readonly retry_policy: cluster_client_retry_policy_t;
   private readonly reconnect_policy: cluster_client_reconnect_policy_t;
-  private readonly transport_security: {
-    use_tls: boolean;
-    ca_pem_list?: string[];
-    client_cert_pem?: string;
-    client_key_pem?: string;
-    reject_unauthorized: boolean;
-    servername?: string;
-  };
+  private readonly transport_security: cluster_tls_client_config_t;
 
   private client_http2_session: ClientHttp2Session | null = null;
   private connect_in_progress_promise: Promise<void> | null = null;
@@ -365,14 +359,16 @@ export class ClusterClient {
       backoff_ms: reconnect_policy?.backoff_ms ?? 100
     };
 
-    this.transport_security = {
-      use_tls: transport_security?.use_tls ?? false,
-      ca_pem_list: transport_security?.ca_pem_list,
-      client_cert_pem: transport_security?.client_cert_pem,
-      client_key_pem: transport_security?.client_key_pem,
-      reject_unauthorized: transport_security?.reject_unauthorized ?? true,
-      servername: transport_security?.servername
-    };
+    if (typeof transport_security?.use_tls === 'boolean' && !transport_security.use_tls) {
+      throw new Error(
+        'Insecure transport is disabled. ClusterClient transport_security.use_tls must be true when provided.'
+      );
+    }
+
+    this.transport_security = ValidateTlsClientConfig({
+      tls_client_config: transport_security,
+      field_prefix: 'transport_security'
+    });
   }
 
   async connect(): Promise<void> {
@@ -1092,29 +1088,13 @@ export class ClusterClient {
       );
     }
 
-    const scheme = this.transport_security.use_tls ? 'https' : 'http';
-    const authority = `${scheme}://${this.host}:${this.port}`;
-    const connect_options: Record<string, unknown> = {};
-
-    if (this.transport_security.use_tls) {
-      if (Array.isArray(this.transport_security.ca_pem_list)) {
-        connect_options.ca = this.transport_security.ca_pem_list;
-      }
-
-      if (typeof this.transport_security.client_cert_pem === 'string') {
-        connect_options.cert = this.transport_security.client_cert_pem;
-      }
-
-      if (typeof this.transport_security.client_key_pem === 'string') {
-        connect_options.key = this.transport_security.client_key_pem;
-      }
-
-      connect_options.rejectUnauthorized = this.transport_security.reject_unauthorized;
-
-      if (typeof this.transport_security.servername === 'string') {
-        connect_options.servername = this.transport_security.servername;
-      }
-    }
+    const authority = BuildHttpsAuthority({
+      host: this.host,
+      port: this.port
+    });
+    const connect_options = BuildTlsClientConnectOptions({
+      tls_client_config: this.transport_security
+    });
 
     const session = connect(authority, connect_options);
 
